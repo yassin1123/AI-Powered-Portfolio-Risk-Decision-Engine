@@ -1,4 +1,9 @@
-"""Regime-conditioned: STRESSED min-var, TRANSITION capped, CALM signal-weighted."""
+"""Regime-conditioned portfolio construction (elite brief §4.5).
+
+- **CALM / default:** maximize diversified signal capture via signal × inverse-vol (`_signal_inv_vol`), subject to caps.
+- **TRANSITION:** lower conviction — scale gross to ~0.75× cap before normalize; preserves optionality vs full CALM.
+- **STRESSED / crisis:** capital preservation and correlation containment — long-only minimum-variance sleeve (`_min_variance`).
+"""
 
 from __future__ import annotations
 

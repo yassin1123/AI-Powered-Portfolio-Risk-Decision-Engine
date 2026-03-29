@@ -32,6 +32,33 @@ def sortino_ratio(returns: pd.Series, rf: float = 0.0) -> float:
     return float(np.sqrt(252) * (x.mean() - daily_rf) / dstd)
 
 
+def var_breach_stats(log_rows: list[dict]) -> dict[str, float]:
+    """Approximate daily VaR breaches: log return worse than negative MC VaR (same units as engine log)."""
+    if not log_rows:
+        return {"var_breach_rate": 0.0, "var_breach_cluster_max": 0.0}
+    n = 0
+    breaches = 0
+    run = 0
+    max_run = 0
+    for row in log_rows:
+        v = row.get("var_99")
+        pnl = row.get("pnl_frac")
+        if v is None or pnl is None:
+            continue
+        vf = float(v)
+        pf = float(pnl)
+        n += 1
+        hit = pf < -vf
+        if hit:
+            breaches += 1
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 0
+    rate = breaches / n if n else 0.0
+    return {"var_breach_rate": float(rate), "var_breach_cluster_max": float(max_run)}
+
+
 def summarize_backtest(
     equity_curve: pd.Series,
     turnover_series: pd.Series,

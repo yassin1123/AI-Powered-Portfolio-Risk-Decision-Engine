@@ -12,3 +12,8 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# Canonical yfinance dumps / aligned panels (rebuild: python scripts/build_data_panel.py)
+data/raw/
+data/processed/closes.csv
+data/processed/closes.parquet

@@ -43,6 +43,16 @@ class DecisionEngineConfig(BaseModel):
     anomaly_suppress_count: int = 3
     exposure_scale_stress: float = 0.55
     exposure_scale_transition: float = 0.82
+    confidence_anomaly_divisor: float = Field(
+        default=14.0,
+        ge=1e-6,
+        description="noise = clip(anomaly_count/divisor, 0, 1); larger divisor → milder confidence penalty.",
+    )
+    confidence_transition_penalty: float = Field(
+        default=0.08,
+        ge=0.0,
+        description="Subtracted from raw trace confidence when priority is transition.",
+    )
 
 
 class PortfolioConfig(BaseModel):
@@ -73,6 +83,15 @@ class BacktestConfig(BaseModel):
     synthetic_vol_per_bar: float = Field(
         default=0.01,
         description="Std dev of per-bar log shock multiplier (Gaussian) in synthetic panel.",
+    )
+    rebalance_every_bars: int = Field(
+        default=1,
+        ge=1,
+        description="1 = daily rebalance; 5 ≈ weekly; 21 ≈ monthly.",
+    )
+    risk_disagreement_rel_threshold: float = Field(
+        default=0.35,
+        description="|HS VaR − MC VaR| / max(MC, ε) above this → risk_disagreement flag in logs.",
     )
 
 
@@ -152,6 +171,10 @@ class AppSettings(BaseSettings):
     )
 
     lookback_days: int = 504
+    history_start: str = Field(
+        default="2010-01-01",
+        description="ISO date: yfinance history start (elite brief §4.1 / scripts/build_data_panel.py).",
+    )
     poll_interval_live_sec: int = 60
     poll_interval_sim_sec: int = 1
     simulation_mode: bool = True

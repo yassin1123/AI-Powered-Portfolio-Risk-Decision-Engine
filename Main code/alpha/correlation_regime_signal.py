@@ -1,4 +1,14 @@
-"""Flagship: z-score of DCC average correlation vs its rolling history → risk / positioning regime."""
+"""Hero signal (elite brief §4.3): correlation-stress z-score.
+
+**Definition (frozen for research):** Let ρ_t be the sample average pairwise correlation of
+log-return residuals over the trailing covariance window (same window as the backtest loop).
+Let μ_t and σ_t be the mean and (ddof=1) standard deviation of the last W values of ρ in the
+expanding history (W = `correlation_signal.rolling_window`, or full history if W < 10 bars).
+The **hero score** is z_t = (ρ_t − μ_t) / (σ_t + ε) with ε = `correlation_signal.eps_std`.
+
+**Buckets:** z_t > z_high → crisis_spike; z_t < z_low → diversification; else normal.
+This is intentionally simple and testable; eigenvalue-share variants can plug in behind the same API later.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +31,20 @@ class CorrRegimeSignalResult:
     reduce_exposure: bool
     activate_hedge: bool
     allow_more_risk: bool
+
+
+def neutral_corr_regime_signal(current_avg_corr: float) -> CorrRegimeSignalResult:
+    """Ablations: correlation path present but non-informative (always normal bucket)."""
+    return CorrRegimeSignalResult(
+        corr_t=float(current_avg_corr),
+        corr_mean=float(current_avg_corr),
+        corr_std=1.0,
+        corr_z=0.0,
+        bucket="normal",
+        reduce_exposure=False,
+        activate_hedge=False,
+        allow_more_risk=False,
+    )
 
 
 def correlation_regime_signal(

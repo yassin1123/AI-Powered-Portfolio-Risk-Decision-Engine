@@ -37,16 +37,25 @@ def _row(strategy: str, m: dict[str, float]) -> dict[str, float | str]:
     return {
         "Strategy": strategy,
         "Sharpe": round(float(m.get("sharpe", 0)), 4),
+        "Sharpe_gross": round(float(m.get("sharpe_gross", m.get("sharpe", 0))), 4),
         "max_dd": round(float(m.get("max_dd", 0)), 6),
+        "max_dd_gross": round(float(m.get("max_dd_gross", m.get("max_dd", 0))), 6),
         "var_breach_rate": float(m.get("var_breach_rate", 0)),
+        "var_breach_cluster_max": float(m.get("var_breach_cluster_max", 0)),
         "mean_turnover": round(float(m.get("mean_turnover", 0)), 6),
         "cagr": round(float(m.get("cagr", 0)), 6),
+        "cagr_gross": round(float(m.get("cagr_gross", m.get("cagr", 0))), 6),
     }
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Portfolio risk engine backtest")
-    p.add_argument("--synthetic", action="store_true", help="Use synthetic price panel (default)")
+    p.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Use synthetic price panel (stress/demo; headline path is real data)",
+    )
+    p.add_argument("--panel", type=Path, default=None, help="Explicit path to processed closes CSV/parquet")
     p.add_argument("--placebo", action="store_true", help="Only run random-signal placebo")
     p.add_argument("--no-extras", action="store_true", help="Skip lead-lag, breakdown, plots, key_findings")
     p.add_argument(
@@ -54,7 +63,25 @@ def main() -> None:
         action="store_true",
         help="Only run lead-lag script on existing research/outputs/decision_log.csv",
     )
+    p.add_argument("--no-qc", action="store_true", help="Skip pre-backtest data quality report")
+    p.add_argument(
+        "--qc-out",
+        type=Path,
+        default=None,
+        help="Write data_quality_report.json (default: research/outputs/data_quality_report.json)",
+    )
     p.add_argument("--config", type=Path, default=None)
+    p.add_argument(
+        "--cost-sweep",
+        action="store_true",
+        help="Write cost_sensitivity.csv for cost_bps in {5,10,20} (full mode only) and exit",
+    )
+    p.add_argument(
+        "--rebalance-every",
+        type=int,
+        default=None,
+        help="Override backtest.rebalance_every_bars for this run",
+    )
     args = p.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -72,30 +99,97 @@ def main() -> None:
         print(f"Wrote {out_dir / 'leadlag_summary.csv'}")
         return
 
-    closes = synthetic_closes()
+    if args.synthetic:
+        closes = synthetic_closes(
+            daily_drift=settings.backtest.synthetic_daily_drift,
+            vol_per_bar=settings.backtest.synthetic_vol_per_bar,
+        )
+    elif args.panel is not None:
+        pth = args.panel
+        if pth.suffix.lower() in (".parquet", ".pq"):
+            closes = pd.read_parquet(pth)
+        else:
+            closes = pd.read_csv(pth, index_col=0, parse_dates=True)
+        closes.index = pd.DatetimeIndex(pd.to_datetime(closes.index)).sort_values()
+    else:
+        from data.panel_store import load_processed_closes
+
+        closes, _meta = load_processed_closes(root)
+        if closes.empty:
+            print(
+                "No processed panel found. Build real data:\n"
+                "  python scripts/build_data_panel.py\n"
+                "Or pass --panel PATH / use --synthetic for a demo panel.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if not args.no_qc:
+        from data.data_quality import compute_panel_quality, write_quality_report
+
+        qc = compute_panel_quality(closes)
+        qc_path = args.qc_out or (out_dir / "data_quality_report.json")
+        write_quality_report(qc, qc_path)
+        print(f"Wrote {qc_path} (ok_for_backtest={qc.ok_for_backtest})")
+        if not qc.ok_for_backtest:
+            print("Quality warnings:\n  " + "\n  ".join(qc.warnings), file=sys.stderr)
+            sys.exit(1)
+
+    if args.cost_sweep:
+        sweep_rows: list[dict[str, float | str]] = []
+        for bps in (5.0, 10.0, 20.0):
+            pc = settings.portfolio.model_copy(update={"cost_bps": bps})
+            s2 = settings.model_copy(update={"portfolio": pc})
+            r = run_backtest(
+                closes,
+                s2,
+                mode="full",
+                rebalance_every=args.rebalance_every,
+            )
+            sweep_rows.append(
+                {
+                    "cost_bps": bps,
+                    "cagr": round(float(r.metrics.get("cagr", 0)), 6),
+                    "cagr_gross": round(float(r.metrics.get("cagr_gross", 0)), 6),
+                    "sharpe": round(float(r.metrics.get("sharpe", 0)), 4),
+                    "max_dd": round(float(r.metrics.get("max_dd", 0)), 6),
+                    "mean_turnover": round(float(r.metrics.get("mean_turnover", 0)), 6),
+                }
+            )
+        cpath = out_dir / "cost_sensitivity.csv"
+        with open(cpath, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(sweep_rows[0].keys()))
+            w.writeheader()
+            w.writerows(sweep_rows)
+        print(f"Wrote {cpath}")
+        return
 
     rows: list[dict[str, float | str]] = []
     export_res = None
     if args.placebo:
-        export_res = run_backtest(closes, settings, mode="placebo_random")
+        export_res = run_backtest(
+            closes, settings, mode="placebo_random", rebalance_every=args.rebalance_every
+        )
         rows.append(_row("placebo_random_signals", export_res.metrics))
     else:
         ladder = [
-            ("Baseline", "baseline"),
-            ("Vol targeting only", "vol_target_only"),
+            ("Baseline EW", "baseline"),
+            ("Inverse vol (RP proxy)", "vol_target_only"),
+            ("Momentum 50% long", "momentum_naive"),
             ("Signals only", "signals_only"),
             ("Correlation signal only", "corr_signal_only"),
             ("Full system", "full"),
         ]
+        rb = args.rebalance_every
         for label, mode in ladder:
-            res = run_backtest(closes, settings, mode=mode)  # type: ignore[arg-type]
+            res = run_backtest(closes, settings, mode=mode, rebalance_every=rb)  # type: ignore[arg-type]
             rows.append(_row(label, res.metrics))
             if mode == "full":
                 export_res = res
-        res_p = run_backtest(closes, settings, mode="placebo_random")
+        res_p = run_backtest(closes, settings, mode="placebo_random", rebalance_every=rb)
         rows.append(_row("placebo_random_signals", res_p.metrics))
         if export_res is None:
-            export_res = run_backtest(closes, settings, mode="full")
+            export_res = run_backtest(closes, settings, mode="full", rebalance_every=rb)
 
     ladder_path = out_dir / "ladder_table.csv"
     fieldnames = list(rows[0].keys())
@@ -106,7 +200,11 @@ def main() -> None:
 
     if export_res is not None:
         pd.DataFrame(export_res.decision_log).to_csv(out_dir / "decision_log.csv", index=False)
-        export_res.equity.rename("equity").to_csv(out_dir / "equity_curve.csv")
+        export_res.equity.rename("equity_net").to_csv(out_dir / "equity_curve.csv")
+        if export_res.equity_gross is not None:
+            export_res.equity_gross.rename("equity_gross").to_csv(
+                out_dir / "equity_curve_gross.csv", index=True
+            )
 
     run_extras = not args.no_extras and not args.placebo
     if run_extras and export_res is not None:

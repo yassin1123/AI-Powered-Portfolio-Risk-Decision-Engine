@@ -13,6 +13,32 @@ from dash.exceptions import PreventUpdate
 from plotly.subplots import make_subplots
 
 from core.publish import read_snapshot
+from dashboard.sections.advanced import build_advanced_section, build_scenario_panel_static
+from dashboard.sections.decision_trace import build_decision_trace_panel
+from dashboard.sections.hero import build_hero_panel
+from dashboard.sections.historical import (
+    build_analogs_panel,
+    build_regime_performance_panel,
+    build_timeline_panel,
+    killer_chart_caption,
+)
+from dashboard.sections.market_structure import build_market_structure_panel, build_narrative_why_block
+from dashboard.sections.risk_narrative import build_risk_narrative_panel
+from dashboard.text_blocks import action_line
+from dashboard.theme import (
+    ACCENT,
+    AMBER,
+    BLUE,
+    DARK,
+    GREEN,
+    MUTED,
+    PANEL,
+    RED,
+    TEXT,
+    regime_color,
+    regime_fill_rgba,
+)
+from dashboard.view_model import build_ui_model
 
 
 def _header_daily_pct(h: dict) -> float:
@@ -23,8 +49,10 @@ def _header_daily_pct(h: dict) -> float:
 
 
 def _path_is_research(pathname: str | None) -> bool:
-    p = (pathname or "/").lower().strip()
-    return p.rstrip("/") == "/research" or p.endswith("/research")
+    if pathname is None:
+        return False
+    p = pathname.lower().strip().rstrip("/") or "/"
+    return p == "/research"
 
 _ROOT = Path(__file__).resolve().parent.parent
 _RESEARCH_OUT = _ROOT / "research" / "outputs"
@@ -37,164 +65,6 @@ _WRAP_TRANSITION = {
     "transition": "opacity 0.18s ease-out",
     "willChange": "opacity",
 }
-
-DARK = "#0d1117"
-PANEL = "#161b22"
-TEXT = "#e6edf3"
-MUTED = "#8b949e"
-ACCENT = "#58a6ff"
-GREEN = "#3fb950"
-AMBER = "#d29922"
-RED = "#f85149"
-BLUE = "#58a6ff"
-
-REGIME_BORDER = {
-    "CALM": GREEN,
-    "NORMAL": GREEN,
-    "TRANSITION": AMBER,
-    "STRESS": AMBER,
-    "CRISIS": RED,
-}
-
-
-def _regime_color(regime: str) -> str:
-    r = (regime or "").upper()
-    for k, v in REGIME_BORDER.items():
-        if k in r or r in k:
-            return v
-    return ACCENT
-
-
-_CORR_Z_SPIKE = 1.5
-
-
-def _regime_fill_rgba(reg: str) -> str:
-    u = (reg or "").upper()
-    if "STRESS" in u or "CRISIS" in u:
-        return "rgba(248,81,73,0.14)"
-    if "TRANSITION" in u:
-        return "rgba(210,153,34,0.14)"
-    return "rgba(63,185,80,0.10)"
-
-
-def _action_line(ss: dict) -> str:
-    dec = ss.get("decision") or {}
-    pct = float(dec.get("exposure_scale") or 1.0) * 100
-    hedge = bool(dec.get("activate_hedge"))
-    pr = str(dec.get("priority") or ss.get("decision_priority") or "normal")
-    if pr in ("normal", "diversification_regime", "signals_only_neutral") and pct >= 99 and not hedge:
-        return "→ Action: Maintain standard risk budget; no mandatory de-risk or hedge activation."
-    parts = [f"Scale target exposure to ~{pct:.0f}% of baseline"]
-    if hedge:
-        parts.append("activate hedge overlay")
-    return "→ Action: " + " + ".join(parts) + "."
-
-
-def _decision_explanation_text(ss: dict) -> str:
-    dec = ss.get("decision") or {}
-    pr = str(dec.get("priority") or ss.get("decision_priority") or "normal")
-    cz = float(ss.get("corr_z") or 0.0)
-    reg = str(ss.get("regime") or "")
-    bucket = str(dec.get("corr_bucket") or ss.get("corr_bucket") or "")
-    lines = {
-        "stress_corr_override": (
-            "Stressed regime coincides with very high correlation instability. "
-            "That combination usually means systemic co-movement and fragile diversification. "
-            "The engine overrides discretionary risk-taking, cuts exposure sharply, and prioritises defensive positioning."
-        ),
-        "corr_crisis": (
-            "Correlation Instability (Z-score) has spiked above the crisis threshold. "
-            "That indicates co-movement is unusually high versus its own history—diversification is doing less work when you need it most. "
-            "The system scales risk down and turns hedging on to limit drawdowns."
-        ),
-        "anomaly_suppress": (
-            "Multiple independent anomaly detectors fired together. "
-            "That suggests the return distribution or structure of the book may be shifting. "
-            "The system suppresses non-defensive risk until the picture stabilises."
-        ),
-        "stressed_regime": (
-            "The regime classifier labels conditions as stressed (vol and/or correlation elevated). "
-            "Exposure is reduced and hedges may be armed depending on the correlation bucket."
-        ),
-        "transition": (
-            "Markets are in a transition regime—signals are noisier and correlations less stable. "
-            "The engine dials gross exposure back until the state becomes clearer."
-        ),
-        "var_breach_risk": (
-            "Estimated tail loss (VaR) is elevated versus your configured limit. "
-            "The system trims risk budget before a larger shock crystallises."
-        ),
-        "diversification_regime": (
-            "Correlation instability is unusually low—dispersion and diversification are more available. "
-            "The engine can allow slightly fuller risk within constraints."
-        ),
-        "normal": (
-            "No stress override is active: correlation instability, regime, anomalies, and VaR are not jointly breaching aggressive thresholds. "
-            "The book follows the standard signal and risk-budget path."
-        ),
-        "signals_only_neutral": (
-            "Decision layer is neutral (signals-only backtest mode); no regime-based de-risking is applied here."
-        ),
-    }
-    body = lines.get(pr, lines["normal"])
-    extra = []
-    if cz > _CORR_Z_SPIKE:
-        extra.append(f"Current Z-score {cz:.2f} supports a correlation-focused read.")
-    if reg and pr != "normal":
-        extra.append(f"Regime label: {reg}.")
-    if bucket and bucket != "none":
-        extra.append(f"Correlation bucket: {bucket}.")
-    tail = " " + " ".join(extra) if extra else ""
-    return body + tail
-
-
-def _killer_strip_labels(ss: dict, vp: dict) -> tuple[list[tuple[str, str, str]], str]:
-    """(label, value, color) x4 and strip border color."""
-    cz = float(ss.get("corr_z") or 0.0)
-    if abs(cz) >= _CORR_Z_SPIKE:
-        corr_l, corr_v, corr_c = "Correlation", f"HIGH ({cz:.2f} ↑)", RED
-    elif abs(cz) >= 1.0:
-        corr_l, corr_v, corr_c = "Correlation", "MODERATE", AMBER
-    else:
-        corr_l, corr_v, corr_c = "Correlation", "NORMAL", GREEN
-
-    pred = float(ss.get("predicted_ann_vol_pct") or 0.0)
-    tgt = float(ss.get("target_ann_vol_pct") or 10.0)
-    if pred > tgt * 1.25:
-        vol_l, vol_v, vol_c = "Volatility", "HIGH", RED
-    elif pred > tgt * 1.08:
-        vol_l, vol_v, vol_c = "Volatility", "MODERATE", AMBER
-    else:
-        vol_l, vol_v, vol_c = "Volatility", "MODERATE", GREEN if pred < tgt else AMBER
-
-    reg = str(ss.get("regime") or "?")
-    reg_u = reg.upper()
-    if any(x in reg_u for x in ("STRESS", "CRISIS")):
-        rg_l, rg_v, rg_c = "Regime", reg, RED
-    elif "TRANSITION" in reg_u:
-        rg_l, rg_v, rg_c = "Regime", reg, AMBER
-    else:
-        rg_l, rg_v, rg_c = "Regime", reg, GREEN
-
-    pr = str(ss.get("decision_priority") or (ss.get("decision") or {}).get("priority") or "normal")
-    if pr in ("normal", "diversification_regime", "signals_only_neutral") and abs(cz) < _CORR_Z_SPIKE:
-        risk_l, risk_v, risk_c = "Risk level", "NORMAL", GREEN
-    elif pr in ("transition", "var_breach_risk"):
-        risk_l, risk_v, risk_c = "Risk level", "ELEVATED", AMBER
-    else:
-        risk_l, risk_v, risk_c = "Risk level", "ELEVATED", RED
-
-    strip_border = risk_c
-    return (
-        [
-            (corr_l, corr_v, corr_c),
-            (vol_l, vol_v, vol_c),
-            (rg_l, rg_v, rg_c),
-            (risk_l, risk_v, risk_c),
-        ],
-        strip_border,
-    )
-
 
 def _strip_chip(label: str, value: str, color: str) -> html.Div:
     return html.Div(
@@ -213,30 +83,156 @@ def _strip_chip(label: str, value: str, color: str) -> html.Div:
     )
 
 
+def _portfolio_context_chips(corr_d: dict, vp: dict) -> html.Div:
+    pct = vp.get("var_99_percentile_vs_history")
+    pct_s = f"{pct:.0f}th" if pct is not None and isinstance(pct, (int, float)) else "—"
+    br = int(vp.get("breaches_30d") or 0)
+    trend = str(vp.get("var_trend_label") or "—")
+    div_s = float(corr_d.get("diversification_score") or 0.0)
+    chips = [
+        _strip_chip("Diversification (1−ρ̄)", f"{div_s:.2f}", GREEN if div_s > 0.45 else AMBER),
+        _strip_chip("VaR pctile", pct_s, AMBER if pct is not None and pct > 75 else GREEN),
+        _strip_chip("Breaches (30d)", str(br), RED if br >= 3 else GREEN),
+        _strip_chip("VaR trend", trend.upper(), RED if trend == "increasing" else GREEN),
+    ]
+    return html.Div(
+        style={"display": "flex", "flexWrap": "wrap", "gap": "10px", "marginBottom": "14px"},
+        children=chips,
+    )
+
+
 def _fig_killer_overlay(ov: dict) -> go.Figure:
+    fs = ov.get("full_span")
+    if isinstance(fs, dict) and fs.get("dates") and len(fs["dates"]) >= 2:
+        return _fig_killer_overlay_full_span(fs)
+    return _fig_killer_overlay_cycle(ov)
+
+
+def _fig_killer_overlay_full_span(fs: dict) -> go.Figure:
+    dates = list(fs["dates"])
+    dd = [float(x) for x in (fs.get("drawdown_pct") or [])]
+    cz_raw = fs.get("corr_z") or []
+    cz: list[float] = []
+    for x in cz_raw:
+        try:
+            v = float(x)
+            cz.append(v if np.isfinite(v) else 0.0)
+        except (TypeError, ValueError):
+            cz.append(0.0)
+    reg = [str(x) for x in (fs.get("regime") or [])]
+    if len(reg) != len(dates):
+        reg = ["NORMAL"] * len(dates)
+    n = min(len(dates), len(dd), len(cz), len(reg))
+    if n < 2:
+        return _empty_killer_fig("Computing full history overlay…")
+
+    dates, dd, cz, reg = dates[:n], dd[:n], cz[:n], reg[:n]
+    max_pts = 3500
+    if n > max_pts:
+        step = max(1, n // max_pts)
+        dates = dates[::step]
+        dd = dd[::step]
+        cz = cz[::step]
+        reg = reg[::step]
+        n = len(dates)
+
+    x_dt = pd.to_datetime(dates)
+    h0 = str(fs.get("history_start") or "")
+    h1 = str(fs.get("history_end") or "")
+    nb = fs.get("n_bars", n)
+    title = (
+        f"📉 Drawdown vs correlation Z — {h0} → {h1}<br>"
+        f"<sup>{nb} trading days (downsampled for display if very long)</sup>"
+    )
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    shapes: list[dict] = []
+    i0 = 0
+    for i in range(1, n + 1):
+        new_seg = i == n or reg[i] != reg[i0]
+        if not new_seg:
+            continue
+        i1 = i - 1
+        shapes.append(
+            dict(
+                type="rect",
+                xref="x",
+                yref="paper",
+                x0=x_dt[i0],
+                x1=x_dt[i1],
+                y0=0,
+                y1=1,
+                fillcolor=regime_fill_rgba(reg[i0]),
+                line_width=0,
+                layer="below",
+            )
+        )
+        i0 = i if i < n else i0
+
+    fig.update_layout(shapes=shapes)
+    fig.add_trace(
+        go.Scatter(
+            x=x_dt,
+            y=dd,
+            mode="lines",
+            name="Portfolio drawdown %",
+            line=dict(color="#58a6ff", width=1.5),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_dt,
+            y=cz,
+            mode="lines",
+            name="Correlation instability (z)",
+            line=dict(color="#ffa657", width=1.5),
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        title=dict(text=title, x=0, xanchor="left"),
+        paper_bgcolor=PANEL,
+        plot_bgcolor=DARK,
+        font_color=TEXT,
+        hovermode="x unified",
+        margin=dict(t=72, b=48, l=58, r=58),
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0, font=dict(size=11)),
+    )
+    fig.update_xaxes(gridcolor="#30363d", title="Date")
+    fig.update_yaxes(title_text="Drawdown %", secondary_y=False, gridcolor="#30363d")
+    fig.update_yaxes(title_text="Z-score", secondary_y=True, gridcolor="#30363d")
+    return fig
+
+
+def _empty_killer_fig(msg: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg,
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(color=MUTED, size=14),
+    )
+    fig.update_layout(
+        title="📉 Drawdown vs Correlation Instability (regime shading)",
+        paper_bgcolor=PANEL,
+        plot_bgcolor=DARK,
+        font_color=TEXT,
+        margin=dict(t=48, b=40, l=55, r=55),
+    )
+    return fig
+
+
+def _fig_killer_overlay_cycle(ov: dict) -> go.Figure:
     dd = ov.get("drawdown") or []
     cz = ov.get("corr_z") or []
     reg = ov.get("regime") or []
-    n = min(len(dd), len(cz), len(reg), 500)
+    n = min(len(dd), len(cz), len(reg), 5000)
     if n < 2:
-        fig = go.Figure()
-        fig.add_annotation(
-            text="Live history builds as the risk loop runs…",
-            xref="paper",
-            yref="paper",
-            x=0.5,
-            y=0.5,
-            showarrow=False,
-            font=dict(color=MUTED, size=14),
-        )
-        fig.update_layout(
-            title="📉 Drawdown vs Correlation Instability (regime shading)",
-            paper_bgcolor=PANEL,
-            plot_bgcolor=DARK,
-            font_color=TEXT,
-            margin=dict(t=48, b=40, l=55, r=55),
-        )
-        return fig
+        return _empty_killer_fig("Live history builds as the risk loop runs…")
 
     dd = [float(x) * 100 for x in dd[-n:]]
     cz = [float(x) for x in cz[-n:]]
@@ -260,7 +256,7 @@ def _fig_killer_overlay(ov: dict) -> go.Figure:
                 x1=x[i1] + 0.5,
                 y0=0,
                 y1=1,
-                fillcolor=_regime_fill_rgba(reg[i0]),
+                fillcolor=regime_fill_rgba(reg[i0]),
                 line_width=0,
                 layer="below",
             )
@@ -303,255 +299,6 @@ def _fig_killer_overlay(ov: dict) -> go.Figure:
     return fig
 
 
-def _signal_color(sig: str) -> str:
-    s = (sig or "").upper()
-    if "REDUCE" in s:
-        return RED
-    if "TRANSITION" in s:
-        return AMBER
-    if "MAINTAIN" in s:
-        return GREEN
-    if "EXPAND" in s or "ALLOW" in s:
-        return ACCENT
-    return TEXT
-
-
-def _build_system_command(ss: dict) -> html.Div:
-    tr = ss.get("decision_trace") or {}
-    dec = ss.get("decision") or {}
-    sig = str(tr.get("system_signal") or dec.get("system_signal") or "MAINTAIN")
-    conf = float(tr.get("confidence") if tr.get("confidence") is not None else dec.get("confidence") or 0.55)
-    reg = str(ss.get("regime") or "?")
-    rule = str(tr.get("winning_rule_id") or dec.get("winning_rule_id") or "—")
-    mult = float(dec.get("exposure_scale") or 1.0)
-    col = _signal_color(sig)
-    action = _action_line(ss)
-    return html.Div(
-        style={
-            "backgroundColor": "#0d1117",
-            "border": f"4px solid {col}",
-            "borderRadius": "12px",
-            "padding": "22px 26px",
-            "marginBottom": "16px",
-        },
-        children=[
-            html.Div(
-                "SYSTEM OUTPUT — control layer",
-                style={
-                    "fontSize": "11px",
-                    "color": MUTED,
-                    "letterSpacing": "0.14em",
-                    "fontWeight": "700",
-                },
-            ),
-            html.Div(
-                f"SYSTEM SIGNAL: {sig}",
-                style={
-                    "fontSize": "clamp(22px, 4vw, 32px)",
-                    "fontWeight": "800",
-                    "color": col,
-                    "marginTop": "10px",
-                    "letterSpacing": "0.03em",
-                },
-            ),
-            html.Div(
-                style={"display": "flex", "flexWrap": "wrap", "gap": "22px", "marginTop": "16px"},
-                children=[
-                    html.Div(
-                        [
-                            html.Div("CONFIDENCE", style={"fontSize": "10px", "color": MUTED}),
-                            html.Div(f"{conf * 100:.0f}%", style={"fontSize": "24px", "fontWeight": "700"}),
-                        ]
-                    ),
-                    html.Div(
-                        [
-                            html.Div("REGIME", style={"fontSize": "10px", "color": MUTED}),
-                            html.Div(reg, style={"fontSize": "24px", "fontWeight": "700", "color": TEXT}),
-                        ]
-                    ),
-                    html.Div(
-                        [
-                            html.Div("RISK MULTIPLIER", style={"fontSize": "10px", "color": MUTED}),
-                            html.Div(f"{mult:.2f}×", style={"fontSize": "24px", "fontWeight": "700", "color": AMBER}),
-                        ]
-                    ),
-                    html.Div(
-                        [
-                            html.Div("WINNING RULE", style={"fontSize": "10px", "color": MUTED}),
-                            html.Div(rule, style={"fontSize": "13px", "fontWeight": "600", "color": MUTED, "maxWidth": "280px"}),
-                        ]
-                    ),
-                ],
-            ),
-            html.Div(
-                ["→ ", action],
-                style={"marginTop": "14px", "fontSize": "15px", "fontWeight": "600", "color": AMBER},
-            ),
-        ],
-    )
-
-
-def _build_metrics_institutional(ss: dict, vp: dict, corr: dict) -> html.Div:
-    pct = vp.get("var_99_percentile_vs_history")
-    pct_s = f"{pct:.0f}th" if pct is not None and isinstance(pct, (int, float)) else "—"
-    br = int(vp.get("breaches_30d") or 0)
-    trend = str(vp.get("var_trend_label") or "—")
-    div_s = float(corr.get("diversification_score") or 0.0)
-    div_note = str(corr.get("diversification_note") or "")
-    chips = [
-        _strip_chip("Diversification", f"{div_s:.2f} (1−ρ̄)", GREEN if div_s > 0.45 else AMBER),
-        _strip_chip("VaR pctile", pct_s, AMBER if pct is not None and pct > 75 else GREEN),
-        _strip_chip("Breaches (30d)", str(br), RED if br >= 3 else GREEN),
-        _strip_chip("VaR trend", trend.upper(), RED if trend == "increasing" else GREEN),
-    ]
-    return html.Div(
-        style={
-            "marginBottom": "14px",
-            "padding": "12px 14px",
-            "borderRadius": "8px",
-            "backgroundColor": "#161b22",
-            "borderLeft": f"4px solid {ACCENT}",
-        },
-        children=[
-            html.Div(
-                "⚡ Risk metrics — institutional view",
-                style={
-                    "fontSize": "11px",
-                    "color": MUTED,
-                    "marginBottom": "10px",
-                    "textTransform": "uppercase",
-                    "fontWeight": "600",
-                },
-            ),
-            html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "10px"}, children=chips),
-            html.Div(div_note, style={"fontSize": "12px", "color": MUTED, "marginTop": "10px", "maxWidth": "900px"}),
-        ],
-    )
-
-
-def _build_strip(ss: dict, vp: dict) -> html.Div:
-    chips, border = _killer_strip_labels(ss, vp)
-    row = [_strip_chip(l, v, c) for l, v, c in chips]
-    return html.Div(
-        style={
-            "marginBottom": "14px",
-            "padding": "12px 14px",
-            "borderRadius": "8px",
-            "backgroundColor": "#161b22",
-            "borderLeft": f"4px solid {border}",
-        },
-        children=[
-            html.Div(
-                "📊 Current market structure",
-                style={
-                    "fontSize": "11px",
-                    "color": MUTED,
-                    "marginBottom": "10px",
-                    "textTransform": "uppercase",
-                    "fontWeight": "600",
-                },
-            ),
-            html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "10px"}, children=row),
-        ],
-    )
-
-
-def _build_explain(ss: dict) -> html.Div:
-    dec = ss.get("decision") or {}
-    codes = dec.get("codes") or []
-    pr = dec.get("priority") or ss.get("decision_priority") or "—"
-    tr = ss.get("decision_trace") or {}
-    if tr:
-        mech = [html.Li(line, style={"marginBottom": "6px"}) for line in (tr.get("mechanical_lines") or [])]
-        drv = [html.Li(line, style={"marginBottom": "4px", "fontSize": "13px", "color": MUTED}) for line in (tr.get("driver_lines") or [])]
-        pos_lines = tr.get("positioning", {}).get("lines") or []
-        pos_ul = [html.Li(p, style={"marginBottom": "4px"}) for p in pos_lines]
-        flags = tr.get("condition_flags") or {}
-        flag_rows = [html.Div(f"{k}: {v}", style={"fontSize": "11px", "color": MUTED}) for k, v in flags.items()]
-        conc = tr.get("conclusion") or ""
-        policy_note = tr.get("policy_note") or ""
-        children = [
-            html.Div(
-                "Decision drivers (mechanical)",
-                style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "marginBottom": "8px"},
-            ),
-            html.Ul(mech, style={"marginTop": "0", "lineHeight": "1.5", "paddingLeft": "20px"}),
-            html.Div(
-                "Score mass (audit)",
-                style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "margin": "14px 0 6px"},
-            ),
-            html.Ul(drv, style={"marginTop": "0", "paddingLeft": "20px"}),
-            html.Div(
-                "Positioning",
-                style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "margin": "14px 0 6px"},
-            ),
-            html.Ul(pos_ul, style={"marginTop": "0", "paddingLeft": "20px"}),
-            html.Div(
-                conc,
-                style={
-                    "marginTop": "14px",
-                    "padding": "12px",
-                    "backgroundColor": "#21262d",
-                    "borderRadius": "6px",
-                    "fontWeight": "600",
-                    "fontSize": "14px",
-                    "lineHeight": "1.5",
-                },
-            ),
-            html.Details(
-                style={"marginTop": "12px"},
-                children=[
-                    html.Summary("Rule condition flags & policy", style={"cursor": "pointer", "color": MUTED, "fontSize": "12px"}),
-                    html.Div(
-                        [html.P(policy_note, style={"fontSize": "12px", "color": TEXT, "marginTop": "8px"})]
-                        + flag_rows
-                        + [
-                            html.Div(
-                                f"Priority: {pr} · codes: {', '.join(str(c) for c in codes) or '—'}",
-                                style={"fontSize": "12px", "color": MUTED, "marginTop": "8px"},
-                            )
-                        ],
-                    ),
-                ],
-            ),
-        ]
-    else:
-        txt = _decision_explanation_text(ss)
-        children = [
-            html.Div(
-                "🧠 Decision explanation",
-                style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "marginBottom": "8px"},
-            ),
-            html.P(txt, style={"fontSize": "14px", "lineHeight": "1.55", "margin": "0"}),
-            html.Details(
-                style={"marginTop": "12px"},
-                children=[
-                    html.Summary("Technical codes", style={"cursor": "pointer", "color": MUTED, "fontSize": "12px"}),
-                    html.Div(
-                        f"Priority: {pr} · codes: {', '.join(str(c) for c in codes) or '—'}",
-                        style={"fontSize": "12px", "color": MUTED, "marginTop": "6px"},
-                    ),
-                ],
-            ),
-        ]
-    return html.Div(
-        style={
-            "backgroundColor": PANEL,
-            "borderRadius": "8px",
-            "padding": "16px 18px",
-            "marginBottom": "14px",
-            "borderLeft": f"4px solid {ACCENT}",
-        },
-        children=[
-            html.Div(
-                "🧠 Decision trace",
-                style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "marginBottom": "8px"},
-            ),
-            *children,
-        ],
-    )
-
-
 def _severity_rank(s: str) -> int:
     return {"CRITICAL": 0, "WARNING": 1, "WATCH": 2}.get(s or "", 9)
 
@@ -584,16 +331,32 @@ def _nav() -> html.Div:
     return html.Div(
         style={
             "display": "flex",
-            "gap": "16px",
+            "gap": "20px",
             "alignItems": "center",
-            "marginBottom": "14px",
-            "paddingBottom": "10px",
-            "borderBottom": "1px solid #30363d",
+            "flexWrap": "wrap",
         },
         children=[
             html.Span("Risk cockpit", style={"fontWeight": "700", "fontSize": "18px", "marginRight": "12px"}),
-            dcc.Link("LIVE", href="/", style={"color": ACCENT, "textDecoration": "none", "fontWeight": "600"}),
-            dcc.Link("RESEARCH", href="/research", style={"color": MUTED, "textDecoration": "none"}),
+            dcc.Link(
+                "LIVE",
+                href="/",
+                refresh=False,
+                style={"color": ACCENT, "textDecoration": "none", "fontWeight": "600", "padding": "6px 10px", "borderRadius": "6px"},
+            ),
+            dcc.Link(
+                "RESEARCH",
+                href="/research",
+                refresh=False,
+                style={
+                    "color": TEXT,
+                    "textDecoration": "none",
+                    "fontWeight": "600",
+                    "padding": "6px 10px",
+                    "borderRadius": "6px",
+                    "border": "1px solid #30363d",
+                    "backgroundColor": "#21262d",
+                },
+            ),
         ],
     )
 
@@ -991,6 +754,10 @@ def _research_content_signature() -> str:
         "decision_breakdown.csv",
         "decision_log.csv",
         "equity_curve.csv",
+        "equity_curve_gross.csv",
+        "hero_signal_validation_buckets.csv",
+        "ablation_results.csv",
+        "cost_sensitivity.csv",
     ):
         p = _RESEARCH_OUT / name
         parts.append(f"{name}:{p.stat().st_mtime_ns}" if p.is_file() else f"{name}:0")
@@ -998,7 +765,28 @@ def _research_content_signature() -> str:
 
 
 def _build_research_page() -> html.Div:
-    blocks = []
+    blocks = [
+        html.Div(
+            style={
+                "marginBottom": "16px",
+                "padding": "12px 14px",
+                "backgroundColor": PANEL,
+                "borderRadius": "8px",
+                "borderLeft": f"4px solid {ACCENT}",
+            },
+            children=[
+                html.Div("Research spine", style={"fontSize": "11px", "color": MUTED, "textTransform": "uppercase", "marginBottom": "6px"}),
+                html.Ul(
+                    [
+                        html.Li([html.Code("python -m backtest.walkforward"), " — walk-forward OOS"]),
+                        html.Li([html.Code("python scripts/run_ablations.py"), " — component ablations"]),
+                        html.Li([html.Code("python -m backtest.run"), " — equity + decision_log export"]),
+                    ],
+                    style={"margin": "0", "paddingLeft": "20px", "fontSize": "13px", "lineHeight": "1.6"},
+                ),
+            ],
+        )
+    ]
     killer = _RESEARCH_FIG
     if killer.is_file():
         b64 = base64.b64encode(killer.read_bytes()).decode("ascii")
@@ -1017,6 +805,11 @@ def _build_research_page() -> html.Div:
         "decision_breakdown.csv",
         "decision_log.csv",
         "equity_curve.csv",
+        "equity_curve_gross.csv",
+        "hero_signal_validation_buckets.csv",
+        "hero_signal_validation_series.csv",
+        "ablation_results.csv",
+        "cost_sensitivity.csv",
     ]
     for name in csvs:
         p = _RESEARCH_OUT / name
@@ -1047,7 +840,12 @@ def _build_research_page_cached() -> html.Div:
 
 
 def create_app() -> Dash:
-    app = Dash(__name__, suppress_callback_exceptions=True)
+    _dash_dir = Path(__file__).resolve().parent
+    app = Dash(
+        __name__,
+        suppress_callback_exceptions=True,
+        assets_folder=str(_dash_dir / "assets"),
+    )
     app.layout = html.Div(
         style={
             "backgroundColor": DARK,
@@ -1058,6 +856,18 @@ def create_app() -> Dash:
         },
         children=[
             dcc.Location(id="url", refresh=False),
+            html.Div(
+                style={
+                    "position": "sticky",
+                    "top": "0",
+                    "zIndex": "2000",
+                    "backgroundColor": DARK,
+                    "paddingBottom": "10px",
+                    "marginBottom": "8px",
+                    "borderBottom": "1px solid #30363d",
+                },
+                children=[_nav()],
+            ),
             dcc.Interval(
                 id="tick",
                 interval=500,
@@ -1072,7 +882,7 @@ def create_app() -> Dash:
             html.Div(
                 id="research-wrap",
                 style={"display": "none", **_WRAP_TRANSITION},
-                children=[_nav(), html.Div(id="research-inner")],
+                children=[html.Div(id="research-inner")],
             ),
         ],
     )
@@ -1105,10 +915,7 @@ def create_app() -> Dash:
     @app.callback(
         [
             Output("p-banner", "children"),
-            Output("p-command", "children"),
-            Output("p-metrics", "children"),
-            Output("p-strip", "children"),
-            Output("p-explain", "children"),
+            Output("p-elite-stack", "children"),
             Output("p-band1", "children"),
             Output("p-killer", "figure"),
             Output("p2-var", "figure"),
@@ -1122,11 +929,12 @@ def create_app() -> Dash:
             Output("p-signals", "children"),
             Output("p-reverse", "children"),
             Output("p6-feed", "children"),
+            Output("prev-cycle-meta", "data"),
         ],
         [Input("tick", "n_intervals")],
-        [State("url", "pathname")],
+        [State("url", "pathname"), State("prev-cycle-meta", "data")],
     )
-    def refresh(_n, pathname):
+    def refresh(_n, pathname, prev_meta):
         if _path_is_research(pathname):
             raise PreventUpdate
         snap = read_snapshot()
@@ -1149,14 +957,48 @@ def create_app() -> Dash:
             else None
         )
         ss = snap.system_state or {}
-        regime = str(ss.get("regime") or h.get("regime") or "?")
-        rcol = _regime_color(regime)
+        ui = build_ui_model(snap)
+        regime = str(ss.get("regime") or h.get("regime") or ui.get("regime") or "?")
+        rcol = regime_color(regime)
         vp = snap.var_panel or {}
         risk_limit = float(ss.get("risk_limit_var_99", 0.05))
         vb = (snap.report or {}).get("var_block") or {}
         breach = bool(vb.get("var_breach"))
         tail_m = vp.get("tail_multiplier")
         zone = vp.get("backtesting_zone") or "—"
+
+        new_meta = {
+            "regime": str(ui.get("regime") or regime),
+            "headline": str((ui.get("narrative") or {}).get("headline") or ""),
+            "cycle": int((ui.get("meta") or {}).get("cycle") or 0),
+        }
+        flash = bool(
+            prev_meta
+            and (
+                prev_meta.get("regime") != new_meta.get("regime")
+                or prev_meta.get("headline") != new_meta.get("headline")
+            )
+        )
+
+        elite_stack = html.Div(
+            [
+                build_hero_panel(ui, flash_border=flash, legacy_action_line=action_line(ss)),
+                build_narrative_why_block(ui),
+                build_market_structure_panel(ui),
+                _portfolio_context_chips(snap.correlation or {}, vp),
+                build_risk_narrative_panel(ui),
+                html.Div(
+                    style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "alignItems": "flex-start"},
+                    children=[
+                        html.Div(style={"flex": "1 1 400px", "minWidth": 320}, children=[build_timeline_panel(ui)]),
+                        html.Div(style={"flex": "1 1 400px", "minWidth": 320}, children=[build_analogs_panel(ui)]),
+                    ],
+                ),
+                build_regime_performance_panel(ui),
+                build_decision_trace_panel(ui),
+                build_advanced_section(ui),
+            ]
+        )
 
         band = html.Div(
             style={
@@ -1187,10 +1029,6 @@ def create_app() -> Dash:
         )
 
         corr_d = snap.correlation or {}
-        strip = _build_strip(ss, vp)
-        command = _build_system_command(ss)
-        metrics_inst = _build_metrics_institutional(ss, vp, corr_d)
-        explain = _build_explain(ss)
         fig_kill = _fig_killer_overlay(snap.overlay_series or {})
         fig_var = _fig_var_grid(vp, risk_limit)
         fig_corr = _fig_corr(corr_d)
@@ -1272,10 +1110,7 @@ def create_app() -> Dash:
         )
         return (
             banner if banner is not None else [],
-            command,
-            metrics_inst,
-            strip,
-            explain,
+            elite_stack,
             band,
             fig_kill,
             fig_var,
@@ -1289,7 +1124,46 @@ def create_app() -> Dash:
             sig_block,
             rev_block,
             p6,
+            new_meta,
         )
+
+    @app.callback(
+        Output("p-scenario-out", "children"),
+        Input("scenario-apply-btn", "n_clicks"),
+        [
+            State("scenario-vol-mult", "value"),
+            State("scenario-corr-add", "value"),
+            State("url", "pathname"),
+        ],
+        prevent_initial_call=True,
+    )
+    def scenario_whatif(n_clicks, vol_m, corr_add, pathname):
+        if _path_is_research(pathname):
+            raise PreventUpdate
+        if not n_clicks:
+            raise PreventUpdate
+        snap = read_snapshot()
+        elite = (snap.report or {}).get("elite_snapshot")
+        if not isinstance(elite, dict) or not elite.get("market_state"):
+            return html.Div("Elite snapshot not available — run live pipeline with elite_snapshot.", style={"color": MUTED})
+        from scenario.shocks import delta_vs_base, shock_market_state
+
+        ms = elite["market_state"]
+        vm = float(vol_m) if vol_m is not None else 1.0
+        ca = float(corr_add) if corr_add is not None else 0.0
+        shocked, dvec = shock_market_state(ms, vol_ann_mult=vm, corr_z_add=ca)
+        diff = delta_vs_base(ms, shocked)
+        lines = [
+            html.Div("Shocked market_state deltas (read-only)", style={"fontWeight": "600", "marginBottom": "6px"}),
+            html.Pre(
+                str(dvec)[:1200],
+                style={"fontSize": "11px", "color": MUTED, "whiteSpace": "pre-wrap", "margin": "0"},
+            ),
+        ]
+        if diff:
+            lines.append(html.Div("Recursive diff keys", style={"marginTop": "8px", "fontSize": "11px", "color": ACCENT}))
+            lines.append(html.Pre(str(diff)[:800], style={"fontSize": "10px", "color": TEXT, "whiteSpace": "pre-wrap"}))
+        return html.Div(lines)
 
     return app
 
@@ -1351,17 +1225,15 @@ def _live_children() -> list:
         ],
     )
     return [
-        _nav(),
+        dcc.Store(id="prev-cycle-meta", data=None),
         html.Div(id="p-banner"),
-        html.Div(id="p-command"),
-        html.Div(id="p-metrics"),
-        html.Div(id="p-strip"),
-        html.Div(id="p-explain"),
+        html.Div(id="p-elite-stack"),
+        build_scenario_panel_static(),
         html.Div(
             style={"marginBottom": "10px"},
             children=[
                 html.Div(
-                    "⚡ VaR / risk metrics (snapshot)",
+                    "VaR and limits — snapshot chips (evidence)",
                     style={"fontSize": "12px", "color": MUTED, "textTransform": "uppercase", "fontWeight": "600", "marginBottom": "8px"},
                 ),
                 html.Div(id="p-band1"),
@@ -1371,7 +1243,7 @@ def _live_children() -> list:
             style={"marginBottom": "14px"},
             children=[
                 html.Div(
-                    "📈 VaR path (time series)",
+                    "VaR path — time series",
                     style={"fontSize": "12px", "color": MUTED, "textTransform": "uppercase", "fontWeight": "600", "marginBottom": "8px"},
                 ),
                 dcc.Graph(id="p-var-trend", style={"height": 240}),
@@ -1381,14 +1253,15 @@ def _live_children() -> list:
             style={"marginBottom": "14px"},
             children=[
                 html.Div(
-                    "📉 Structure & tail (live history)",
+                    "Historical structure — drawdown vs correlation stress",
                     style={"fontSize": "12px", "color": MUTED, "textTransform": "uppercase", "fontWeight": "600", "marginBottom": "8px"},
                 ),
+                killer_chart_caption(),
                 dcc.Graph(id="p-killer", style={"height": 380}),
             ],
         ),
         html.Div(
-            "📊 Core analytics",
+            "Core analytics — distribution and correlation",
             style={"fontSize": "12px", "color": MUTED, "textTransform": "uppercase", "fontWeight": "600", "marginBottom": "8px"},
         ),
         html.Div(

@@ -52,6 +52,7 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 
 def compute_confidence(
+    settings: AppSettings,
     *,
     regime_confidence: float,
     anomaly_count: int,
@@ -59,11 +60,15 @@ def compute_confidence(
     priority: str,
 ) -> float:
     """Higher when regime classifier is clear, fewer anomalies, multiple drivers agree on stress."""
+    cfg = settings.decision_engine
+    div = max(float(cfg.confidence_anomaly_divisor), 1e-9)
     rc = _clip(float(regime_confidence), 0.0, 1.0)
-    noise = _clip(anomaly_count / 6.0, 0.0, 1.0)
+    noise = _clip(float(anomaly_count) / div, 0.0, 1.0)
     mass = sum(float(d.get("delta", 0.0)) for d in drivers)
     driver_agreement = _clip(mass / 0.85, 0.0, 1.0)
-    trans_penalty = 0.12 if priority == "transition" else 0.0
+    trans_penalty = (
+        float(cfg.confidence_transition_penalty) if priority == "transition" else 0.0
+    )
     raw = 0.22 + 0.38 * rc + 0.28 * (1.0 - noise) + 0.22 * driver_agreement - trans_penalty
     return round(_clip(raw, 0.18, 0.92), 4)
 
@@ -267,6 +272,7 @@ def build_decision_trace_dict(
         divers=divers,
     )
     confidence = compute_confidence(
+        settings,
         regime_confidence=regime_confidence,
         anomaly_count=anomaly_count,
         drivers=drivers,

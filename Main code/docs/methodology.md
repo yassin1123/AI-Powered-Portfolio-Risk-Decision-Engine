@@ -1,5 +1,7 @@
 # Methodology
 
+**Central thesis:** test whether **correlation stress / instability** (the hero z-score of average pairwise correlation) improves **risk-aware** portfolio behaviour versus static baselines—see [`docs/RESEARCH_NOTE.md`](RESEARCH_NOTE.md) and `alpha/correlation_regime_signal.py`.
+
 This document ties **research questions**, **layers**, and **evaluation** to the codebase. Implementation status lives in [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md).
 
 **Code (current):** `regime/`, `alpha/` (incl. `correlation_regime_signal.py`), `core/decision/` (`DecisionEngine` — priority policy in [`decision_policy.md`](decision_policy.md)), `portfolio/`, `hedging/`, `backtest/`, `diagnostics/` (contagion, attribution helpers), `risk/evaluation.py`; live wiring in [`pre/pipeline.py`](../pre/pipeline.py).

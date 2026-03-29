@@ -39,11 +39,11 @@ def _extract_close_panel(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return closes
 
 
-def _download_one_close(ticker: str, period: str) -> tuple[str, pd.Series | None]:
+def _download_one_close(ticker: str, start: str) -> tuple[str, pd.Series | None]:
     """Single-ticker history — avoids yfinance batch NoneType / partial-fail bugs."""
     try:
         tk = yf.Ticker(ticker)
-        h = tk.history(period=period, auto_adjust=True, actions=False)
+        h = tk.history(start=start, auto_adjust=True, actions=False)
     except (TypeError, AttributeError, KeyError, ValueError):
         return ticker, None
     except Exception:
@@ -136,13 +136,14 @@ class DataFetcher:
         self._sim_cursor: int = 0
         self._staleness: dict[str, bool] = {}
 
-    def download_history(self, period: str = "2y") -> pd.DataFrame:
-        """Parallel per-ticker yfinance download; skips delisted / timeouts; rebuilds buffer."""
+    def download_history(self, start: str | None = None) -> pd.DataFrame:
+        """Parallel per-ticker yfinance download from ``history_start`` (brief §4.1); rebuilds buffer."""
+        start_s = start if start is not None else self.settings.history_start
         wanted = list(self.tickers)
         ok: dict[str, pd.Series] = {}
         max_workers = min(8, max(1, len(wanted)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(_download_one_close, t, period): t for t in wanted}
+            futs = {pool.submit(_download_one_close, t, start_s): t for t in wanted}
             for fut in as_completed(futs):
                 t, series = fut.result()
                 if series is not None:
@@ -153,7 +154,6 @@ class DataFetcher:
         closes = closes.ffill(limit=3).bfill(limit=3)
         closes = closes.dropna(axis=1, how="all")
         self.tickers = list(closes.columns)
-        self.buffer = CircularBuffer(self.settings.lookback_days, self.tickers)
         self._staleness = {}
         for c in closes.columns:
             last = closes[c].last_valid_index()
@@ -167,16 +167,18 @@ class DataFetcher:
         idx = closes.index[valid]
         if len(idx) == 0:
             return closes
+        buf_rows = max(len(idx), self.settings.lookback_days)
+        self.buffer = CircularBuffer(buf_rows, self.tickers)
         self.buffer.load_initial(mat, idx)
         self._sim_cursor = max(0, len(closes) - 1)
         return closes
 
-    async def fetch_batch_async(self, period: str = "2y") -> pd.DataFrame:
+    async def fetch_batch_async(self, start: str | None = None) -> pd.DataFrame:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self.download_history(period))
+        return await loop.run_in_executor(None, lambda: self.download_history(start))
 
     def simulation_step(self) -> pd.DataFrame:
-        """Replay history: rolling window ending at cursor, optional lognormal noise (brief §2.2)."""
+        """Replay history: all bars from start through simulation cursor (optional lognormal noise)."""
         if self._history_close is None or self._history_close.empty:
             return self.buffer.get_closes_df()
         hist = self._history_close
@@ -186,8 +188,8 @@ class DataFetcher:
         step = int(max(1, self.settings.simulation_speed))
         self._sim_cursor = (self._sim_cursor + step) % n
         end = min(self._sim_cursor + 1, n)
-        start = max(0, end - self.settings.lookback_days)
-        window = hist.iloc[start:end].copy()
+        # Full history from first bar through simulation cursor (brief: 2010 → present in UI).
+        window = hist.iloc[:end].copy()
         mat = window.values.astype(np.float64)
         if self.settings.simulation_noise_std > 0:
             mat = mat * np.exp(np.random.randn(*mat.shape) * self.settings.simulation_noise_std)

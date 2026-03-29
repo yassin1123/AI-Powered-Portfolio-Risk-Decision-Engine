@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -13,14 +14,21 @@ import pandas as pd
 from alpha.correlation_regime_signal import correlation_regime_signal
 from alpha.gating import gate_signals
 from alpha.signal_combiner import combine_signals
+from api.live_snapshot import build_live_snapshot_v1
+from context.analogs import find_similar_states
+from context.recent_changes import EliteTickSnapshot, compute_recent_changes, ring_append
 from core.decision.decision_engine import DecisionEngine, apply_decision_to_signals
 from core.snapshot import DashboardSnapshot
+from core.state_history import append_history_row, build_timeline_segments, rolling_transition_stats
 from data.fetcher import DataFetcher
 from data.universe import UNIVERSE, AssetClass
 from detection.anomaly import AnomalyPipeline
 from diagnostics.contagion import contagion_index
+from features.history_overlay import build_full_span_overlay
 from features.returns import compute_features
+from features.state_builder import build_market_state
 from hedging.hedge_overlay import recommend_hedge
+from narrative.engine import build_narrative
 from portfolio.constraints import apply_constraints
 from portfolio.optimizer import optimize_weights
 from portfolio.risk_targeting import vol_target_scale
@@ -30,6 +38,7 @@ from regime.regime_state import classify_regime_full, regime_output_to_dict
 from reports.generator import basel_traffic_light, build_json_report
 from risk.garch import GARCHDCCResult, cholesky_cached, fit_garch_dcc
 from risk.portfolio import PortfolioRisk
+from risk.snapshot_blocks import build_allocation_delta, build_risk_vs_target, build_tail_risk_block
 from risk.var import compute_full_var
 from signals.rebalance import RebalancingEngine
 from stress.scenarios import ScenarioLibrary, reverse_stress_test, run_scenario
@@ -53,6 +62,12 @@ class PipelineState:
     overlay_corr_z: list[float] = field(default_factory=list)
     overlay_regime: list[str] = field(default_factory=list)
     var_breach_flags: list[bool] = field(default_factory=list)
+    elite_tick_ring: deque = field(default_factory=lambda: deque(maxlen=252))
+    state_history_rows: list[dict[str, Any]] = field(default_factory=list)
+    analog_feature_history: list[dict[str, float]] = field(default_factory=list)
+    prev_exposure_scale: float | None = None
+    full_span_overlay: dict[str, Any] | None = field(default=None)
+    full_span_key: tuple[Any, ...] | None = field(default=None)
 
 
 def _bond_weight_share(w: pd.Series, tickers: list[str]) -> float:
@@ -196,6 +211,15 @@ def run_risk_cycle(
         )
 
     lr1_sub = lr1_df[common]
+    closes_risk = closes.reindex(columns=common).dropna(how="all")
+    _fs_key = (len(closes_risk), str(closes_risk.index[-1]))
+    if state.full_span_key != _fs_key or state.full_span_overlay is None:
+        if len(closes_risk) >= settings.covariance_window + 15:
+            state.full_span_overlay = build_full_span_overlay(
+                closes_risk, lr1_sub, w_series, settings
+            )
+            state.full_span_key = _fs_key
+
     if state.cycle - state.last_garch_refit_cycle >= max(1, settings.garch_refit_days):
         state.last_garch = fit_garch_dcc(lr1_sub, settings)
         state.last_garch_refit_cycle = state.cycle
@@ -270,6 +294,7 @@ def run_risk_cycle(
         else None
     )
 
+    prior_regime_label = state.prev_regime_label
     ro = classify_regime_full(
         settings,
         var_res.tail_multiplier,
@@ -305,9 +330,9 @@ def run_risk_cycle(
 
     closes_c = closes.reindex(columns=common).dropna(how="all")
     comb = combine_signals(lr1_sub, closes_c, corr_result, settings)
-    raw = comb.per_asset.reindex(common).fillna(0.0)
-    raw = gate_signals(raw, ro.label, anom_count)
-    raw = apply_decision_to_signals(raw, decision, ro.label)
+    sig_pre = comb.per_asset.reindex(common).fillna(0.0)
+    sig_gated = gate_signals(sig_pre, ro.label, anom_count)
+    raw = apply_decision_to_signals(sig_gated, decision, ro.label)
     w_target = optimize_weights(ro.label, raw, sigma_t, common, settings)
     w_target = vol_target_scale(
         w_target,
@@ -420,11 +445,32 @@ def run_risk_cycle(
     state.overlay_drawdown.append(_dd_live)
     state.overlay_corr_z.append(float(corr_result.corr_z))
     state.overlay_regime.append(str(regime))
-    _cap_ov = 200
+    _cap_ov = 50_000
     if len(state.overlay_drawdown) > _cap_ov:
         state.overlay_drawdown = state.overlay_drawdown[-_cap_ov:]
         state.overlay_corr_z = state.overlay_corr_z[-_cap_ov:]
         state.overlay_regime = state.overlay_regime[-_cap_ov:]
+
+    hs99 = float(var_res.hs_var.get((0.99, 1), 0.0))
+    mc99 = float(var_res.mc_var.get((0.99, 1), 0.0))
+    den = max(mc99, 1e-8)
+    risk_disagreement = abs(hs99 - mc99) / den > float(
+        settings.backtest.risk_disagreement_rel_threshold
+    )
+
+    five_questions = {
+        "q1_state": f"Regime {regime} (conf {float(ro.confidence):.2f}); correlation bucket {corr_result.bucket}; z={corr_result.corr_z:.2f}.",
+        "q2_why": f"Anomalies={anom_count}; tail mult {float(var_res.tail_multiplier):.2f}; HS vs MC 99% VaR disagree={risk_disagreement}.",
+        "q3_risk_now": f"Forecast ann vol ~{forecast_ann_vol * 100:.1f}% vs target {settings.portfolio.target_ann_vol * 100:.1f}%; MC 1d 99% VaR ~{mc99 * 100:.2f}%.",
+        "q4_action": (decision.narrative or decision.decision_priority)[:500],
+        "q5_similar_history": "Compare drawdown vs correlation-z overlay below; documented stress windows in docs/failure_analysis.md.",
+    }
+    op_expl = (
+        f"Correlation stress z={corr_result.corr_z:.2f} ({corr_result.bucket}); "
+        f"{anom_count} anomaly hits; 1d 99% VaR estimate {mc99:.4f} vs limit {settings.risk_limit_var_99:.4f}; "
+        f"regime {regime}. "
+        f"Exposure scale {float(decision.exposure_scale):.2f}×; hedge {'on' if decision.activate_hedge else 'off'}."
+    )
 
     system_state = {
         "regime": regime,
@@ -435,6 +481,9 @@ def run_risk_cycle(
         "gross_exposure": float(w_target.sum()),
         "corr_z": round(corr_result.corr_z, 4),
         "corr_bucket": corr_result.bucket,
+        "risk_disagreement": risk_disagreement,
+        "five_questions": five_questions,
+        "operator_explainer": op_expl,
         "contagion_index": round(cont_ix, 4),
         "risk_limit_var_99": float(settings.risk_limit_var_99),
         "top_risk_assets": {str(k): float(v) for k, v in top_rc.items()},
@@ -527,6 +576,162 @@ def run_risk_cycle(
     state.cycle += 1
     cycle_ms = (time.perf_counter() - t0) * 1000
 
+    trans_stats = rolling_transition_stats(state.state_history_rows, 20)
+    stability_score = float(1.0 / (1.0 + float(trans_stats.get("transitions_last_n", 0))))
+    append_history_row(
+        state.state_history_rows,
+        timestamp_iso=str(header["timestamp"]),
+        regime=str(regime),
+        prev_regime=prior_regime_label,
+        confidence=float(ro.confidence),
+        corr_z=float(corr_result.corr_z),
+    )
+
+    trace_drivers = (decision.trace or {}).get("drivers") if decision.trace else None
+    market_state_dict = build_market_state(
+        settings=settings,
+        ro=ro,
+        corr_result=corr_result,
+        avg_corr=float(avg_corr),
+        anom_count=int(anom_count),
+        portfolio_drawdown=float(pdd),
+        forecast_ann_vol=float(forecast_ann_vol),
+        tail_mult=float(var_res.tail_multiplier),
+        risk_disagreement=risk_disagreement,
+        trace_drivers=trace_drivers,
+        stability_score=stability_score,
+    )
+
+    narrative_dict = build_narrative(
+        regime=str(regime),
+        corr_z=float(corr_result.corr_z),
+        corr_bucket=str(corr_result.bucket),
+        anomaly_count=int(anom_count),
+        var_99=float(var_99),
+        var_limit=float(settings.risk_limit_var_99),
+        forecast_vol=float(forecast_ann_vol),
+        target_vol=float(settings.portfolio.target_ann_vol),
+        risk_multiplier=float(decision.exposure_scale),
+        decision_priority=str(decision.decision_priority),
+        activate_hedge=bool(decision.activate_hedge),
+        breach_today=bool(var_meta.get("breach_today", False)),
+        var_trend=str(var_meta.get("var_trend_label", "flat")),
+    )
+
+    plr_series = (lr1_sub * w_series.reindex(common).fillna(0.0)).sum(axis=1)
+    vs_target = build_risk_vs_target(
+        settings=settings,
+        forecast_ann_vol=float(forecast_ann_vol),
+        lr1_portfolio=plr_series,
+    )
+    tail_block = build_tail_risk_block(
+        var_res=var_res,
+        var_meta=var_meta,
+        recent_breaches=(state.var_breach_flags[-30:] if state.var_breach_flags else None),
+    )
+    alloc_delta = build_allocation_delta(
+        w_series.reindex(common).fillna(0.0),
+        w_target.reindex(common).fillna(0.0),
+    )
+
+    def _top_sig_dict(series: pd.Series, n: int = 30) -> dict[str, float]:
+        series = series.fillna(0.0)
+        if len(series) == 0:
+            return {}
+        ix = series.abs().nlargest(min(n, len(series))).index
+        return {str(i): float(series.loc[i]) for i in ix}
+
+    pre_d = _top_sig_dict(sig_pre)
+    gated_d = _top_sig_dict(sig_gated)
+    post_d = _top_sig_dict(raw)
+    ratios: dict[str, float] = {}
+    for c in common:
+        pre_v = float(sig_pre.get(c, 0.0))
+        post_v = float(raw.get(c, 0.0))
+        ratios[str(c)] = float(post_v / pre_v) if abs(pre_v) > 1e-12 else 1.0
+
+    trace_conf = float((decision_trace_out or {}).get("confidence") or ro.confidence)
+    ring_append(
+        state.elite_tick_ring,
+        EliteTickSnapshot(
+            corr_z=float(corr_result.corr_z),
+            var_99=float(var_99),
+            regime=str(regime),
+            confidence=trace_conf,
+            risk_multiplier=float(decision.exposure_scale),
+        ),
+    )
+    recent_changes_dict = compute_recent_changes(state.elite_tick_ring)
+
+    tn = max(float(settings.portfolio.target_ann_vol), 1e-6)
+    feat_row = {
+        "corr_z": float(corr_result.corr_z),
+        "vol_norm": float(forecast_ann_vol / tn),
+        "anomaly_norm": float(anom_count) / 6.0,
+        "dd_norm": float(abs(min(float(pdd), 0.0))),
+        "var_norm": float(var_99) / max(float(settings.risk_limit_var_99), 1e-6),
+    }
+    hist_analog = list(state.analog_feature_history)
+    state.analog_feature_history.append(feat_row)
+    if len(state.analog_feature_history) > 500:
+        state.analog_feature_history = state.analog_feature_history[-500:]
+    analogs_dict = find_similar_states(hist_analog, feat_row, k=5)
+
+    timeline_dict = {
+        **build_timeline_segments(state.state_history_rows),
+        "transition_stats": trans_stats,
+    }
+
+    decision_snapshot = {
+        "timestamp": header["timestamp"],
+        "decision_label": decision.decision_priority,
+        "winning_rule": (decision_trace_out or {}).get("winning_rule_id", ""),
+        "risk_multiplier": float(decision.exposure_scale),
+        "previous_risk_multiplier": state.prev_exposure_scale,
+        "exposure_scale": float(decision.exposure_scale),
+        "activate_hedge": bool(decision.activate_hedge),
+        "suppress_non_defensive": bool(decision.suppress_non_defensive),
+        "conditions_met": (decision.trace or {}).get("condition_flags", {}),
+        "pre_filter_signals_top": pre_d,
+        "post_gate_signals_top": gated_d,
+        "post_decision_signals_top": post_d,
+        "signal_adjustment_ratio_sample": {k: ratios[k] for k in common[: min(40, len(common))]},
+    }
+    state.prev_exposure_scale = float(decision.exposure_scale)
+
+    research_links = {
+        "walkforward_cli": "python -m backtest.walkforward",
+        "ablation_cli": "python scripts/run_ablations.py",
+        "failure_analysis_module": "research.failure_analysis",
+        "by_regime_metrics": "research.by_regime_metrics",
+        "backend_entrypoints": "research.backend_entrypoints",
+        "scenario_shocks": "scenario.shocks",
+    }
+
+    elite_snapshot = build_live_snapshot_v1(
+        settings_profile=str(settings.universe_profile),
+        cycle=int(state.cycle),
+        cycle_ms=float(cycle_ms),
+        data_quality_warnings=[],
+        market_state=market_state_dict,
+        decision=decision_snapshot,
+        narrative=narrative_dict,
+        risk={
+            "vs_target": vs_target,
+            "tail": tail_block,
+        },
+        portfolio={
+            "allocation_delta": alloc_delta,
+            "weights_current": {str(k): float(v) for k, v in w_series.reindex(common).fillna(0.0).items()},
+            "weights_target": {str(k): float(v) for k, v in w_target.reindex(common).fillna(0.0).items()},
+        },
+        recent_changes=recent_changes_dict,
+        timeline=timeline_dict,
+        analogs=analogs_dict,
+        research_links=research_links,
+        decision_trace=decision_trace_out,
+    )
+
     report_payload = build_json_report(
         cycle_ms=cycle_ms,
         portfolio={
@@ -571,6 +776,7 @@ def run_risk_cycle(
         "codes": decision.reason_codes,
         "secondary": decision.secondary_reasons,
     }
+    report_payload["elite_snapshot"] = elite_snapshot
 
     return DashboardSnapshot(
         generated_at=datetime.now(timezone.utc),
@@ -592,6 +798,7 @@ def run_risk_cycle(
             "drawdown": list(state.overlay_drawdown),
             "corr_z": list(state.overlay_corr_z),
             "regime": list(state.overlay_regime),
+            "full_span": state.full_span_overlay or {},
         },
     )
 

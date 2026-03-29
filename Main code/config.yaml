@@ -4,6 +4,8 @@
 universe_profile: core
 
 lookback_days: 504
+# Aligns with brief §4.1 and `python scripts/build_data_panel.py --start …` (default 2010-01-01).
+history_start: "2010-01-01"
 poll_interval_live_sec: 60
 poll_interval_sim_sec: 1
 simulation_mode: true
@@ -60,6 +62,9 @@ decision_engine:
   anomaly_suppress_count: 3
   exposure_scale_stress: 0.55
   exposure_scale_transition: 0.82
+  # Trace confidence: higher divisor / lower penalty → higher gauge in transition + many anomalies.
+  confidence_anomaly_divisor: 14.0
+  confidence_transition_penalty: 0.08
 
 portfolio:
   target_ann_vol: 0.10
@@ -76,6 +81,8 @@ backtest:
   walkforward_train_bars: 504
   walkforward_test_bars: 63
   walkforward_expanding: false
+  rebalance_every_bars: 1
+  risk_disagreement_rel_threshold: 0.35
   # MC paths for 1d 99% VaR in backtest (see docs/backtest_assumptions.md)
   var_mc_sims: 1500
   # Small positive equity drift so default ladder is not pure zero-mean noise (Sharpe ~ 0 then rf-negative).

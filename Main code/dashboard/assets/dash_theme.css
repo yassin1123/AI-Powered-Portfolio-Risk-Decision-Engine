@@ -1,0 +1,44 @@
+/* dcc.Slider (rc-slider) — readable marks and rail on dark background */
+
+.scenario-slider-wrap .rc-slider-mark-text,
+.scenario-panel-root .rc-slider-mark-text {
+  color: #e6edf3 !important;
+  font-size: 11px !important;
+}
+
+.scenario-slider-wrap .rc-slider-mark,
+.scenario-panel-root .rc-slider-mark {
+  color: #e6edf3 !important;
+}
+
+.scenario-slider-wrap .rc-slider-dot,
+.scenario-panel-root .rc-slider-dot {
+  border-color: #8b949e !important;
+}
+
+.scenario-slider-wrap .rc-slider-dot-active,
+.scenario-panel-root .rc-slider-dot-active {
+  border-color: #58a6ff !important;
+}
+
+.scenario-slider-wrap .rc-slider-rail,
+.scenario-panel-root .rc-slider-rail {
+  background-color: #30363d !important;
+}
+
+.scenario-slider-wrap .rc-slider-track,
+.scenario-panel-root .rc-slider-track {
+  background-color: #388bfd !important;
+}
+
+.scenario-slider-wrap .rc-slider-handle,
+.scenario-panel-root .rc-slider-handle {
+  border: solid 2px #58a6ff !important;
+  background-color: #58a6ff !important;
+  opacity: 1 !important;
+}
+
+.scenario-slider-wrap .rc-slider-handle-click-focused,
+.scenario-panel-root .rc-slider-handle-click-focused {
+  border-color: #79c0ff !important;
+}

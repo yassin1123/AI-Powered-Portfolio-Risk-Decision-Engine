@@ -11,6 +11,8 @@ def apply_constraints(
     weights: pd.Series,
     prior: pd.Series | None,
     settings: AppSettings,
+    *,
+    apply_turnover_cap: bool = True,
 ) -> pd.Series:
     w = weights.reindex(weights.index).fillna(0.0)
     cap = settings.portfolio.max_single_weight
@@ -18,7 +20,7 @@ def apply_constraints(
     gross = w.abs().sum()
     if gross > settings.portfolio.max_gross_leverage:
         w = w * (settings.portfolio.max_gross_leverage / gross)
-    if prior is not None and len(prior):
+    if apply_turnover_cap and prior is not None and len(prior):
         p = prior.reindex(w.index).fillna(0.0)
         turn = float((w - p).abs().sum())
         if turn > settings.portfolio.turnover_cap and turn > 0:

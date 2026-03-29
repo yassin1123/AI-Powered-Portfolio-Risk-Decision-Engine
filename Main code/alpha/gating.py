@@ -11,12 +11,15 @@ def gate_signals(
     anomaly_count: int,
     *,
     stress_threshold_anomalies: int = 3,
+    apply_regime: bool = True,
+    apply_anomaly: bool = True,
 ) -> pd.Series:
     mult = 1.0
-    if regime_label == "STRESSED":
-        mult *= 0.35
-    elif regime_label == "TRANSITION":
-        mult *= 0.7
-    if anomaly_count >= stress_threshold_anomalies:
+    if apply_regime:
+        if regime_label == "STRESSED":
+            mult *= 0.35
+        elif regime_label == "TRANSITION":
+            mult *= 0.7
+    if apply_anomaly and anomaly_count >= stress_threshold_anomalies:
         mult *= 0.5
     return raw * mult

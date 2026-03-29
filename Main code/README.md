@@ -2,7 +2,7 @@
 
 ## Project identity — one pillar
 
-**Correlation + regime + risk interaction.** This system models how **correlation dynamics** and **regime shifts** drive **portfolio risk**, and uses that structure to **dynamically adjust exposure** and hedges. **DCC-GARCH**, **anomaly detection**, and the **stress engine** are not separate demos—they feed one closed-loop decision stack evaluated in **backtests** and live monitoring.
+**Regime-aware correlation-stress research.** In one sentence: *we test whether abnormal **correlation expansion and instability** improve **portfolio risk control** (signal weighting, exposure, allocation) versus **static** baselines.* **DCC-GARCH**, **anomaly detection**, and the **stress engine** feed one closed-loop stack evaluated in **backtests**, **walk-forward folds**, **ablations**, and live monitoring—not as a grab-bag of unrelated demos.
 
 ### Core claim
 
@@ -30,16 +30,28 @@ flowchart LR
   Risk -.monitor.-> Reg
 ```
 
-**Reproduce research outputs** (after a historical run):
+**Data (headline path):** build an aligned panel from yfinance, then run backtests on it:
 
 ```bash
 cd "Main code"
 pip install -e ".[dev]"
-python -m backtest.run --help
-python -m backtest.run --synthetic --placebo   # placebo: random signals collapse
+python scripts/build_data_panel.py --profile core --start 2010-01-01
+python -m backtest.run   # uses data/processed/closes.* + QC gate; fails fast if panel missing
 ```
 
-Running `python -m backtest.run` (without `--placebo` or `--no-extras`) writes the **five-strategy ladder** CSV, **lead–lag summary**, **decision breakdown**, and **`killer_overlay.png`** when `matplotlib` is installed, and syncs a quantitative block into [`research/key_findings.md`](research/key_findings.md). See also [`docs/results_summary.md`](docs/results_summary.md) and [`research/outputs/`](research/outputs/).
+**Demo without downloads:** `python -m backtest.run --synthetic` (stress utility; do not present as long-history evidence).
+
+**More research CLI:**
+
+```bash
+python -m backtest.run --help
+python -m backtest.run --synthetic --cost-sweep
+python -m backtest.walkforward --synthetic --fast
+python research/hero_signal_validation.py --synthetic
+python scripts/run_ablations.py --synthetic
+```
+
+Running `python -m backtest.run` on a real panel (without `--placebo` or `--no-extras`) writes the **ladder** CSV (incl. EW / inv-vol / momentum naive), **gross + net** equity curves, **lead–lag summary**, **decision breakdown**, and **`killer_overlay.png`** when `matplotlib` is installed, and syncs [`research/key_findings.md`](research/key_findings.md). See [`docs/RESEARCH_NOTE.md`](docs/RESEARCH_NOTE.md), [`docs/results_summary.md`](docs/results_summary.md), and [`research/outputs/`](research/outputs/).
 
 **Stack:** Python 3.11+, NumPy, SciPy, pandas, `arch`, scikit-learn, statsmodels, yfinance, Dash, pydantic-settings, structlog.
 
@@ -107,6 +119,9 @@ What you get: a **Plotly Dash** operator view (header, **system state** includin
 | [`docs/backtest_assumptions.md`](docs/backtest_assumptions.md) | Execution, costs, universe, placebo |
 | [`docs/model_risk.md`](docs/model_risk.md) | Model limitations and sensitivity |
 | [`docs/failure_analysis.md`](docs/failure_analysis.md) | When the system underperforms |
+| [`docs/RESEARCH_NOTE.md`](docs/RESEARCH_NOTE.md) | Thesis, data, validation, results placeholders |
+| [`docs/ablation_summary.md`](docs/ablation_summary.md) | Ablation grid and how to run it |
+| [`research/failure_cases.md`](research/failure_cases.md) | Living notebook of bad outcomes |
 | [`docs/limitations.md`](docs/limitations.md) | Data and backtest caveats |
 | [`docs/results_summary.md`](docs/results_summary.md) | Ladder table + links to figures |
 | [`research/key_findings.md`](research/key_findings.md) | Quant takeaways |

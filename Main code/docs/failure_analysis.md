@@ -1,5 +1,7 @@
 # Failure analysis — when the system underperforms
 
+For dated, run-specific incidents, add rows to [`research/failure_cases.md`](../research/failure_cases.md).
+
 ## Low-volatility, sideways markets
 
 - **Momentum** and **cross-sectional** sleeves may churn; costs drag **Sharpe**.

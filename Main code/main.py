@@ -12,6 +12,8 @@ import sys
 import threading
 from pathlib import Path
 
+from data.data_quality import compute_panel_quality
+
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -34,6 +36,17 @@ def main() -> None:
     fetcher = DataFetcher(settings, tickers)
     publish_snapshot(DashboardSnapshot.empty("Loading market data…"))
     fetcher.download_history()
+
+    if not settings.simulation_mode:
+        qc = compute_panel_quality(fetcher.latest_closes())
+        log = logging.getLogger(__name__)
+        if not qc.ok_for_backtest:
+            log.warning(
+                "Data quality issues (live): %s",
+                "; ".join(qc.warnings) or "ok_for_backtest=false",
+            )
+        elif qc.warnings:
+            log.info("Data quality notes: %s", "; ".join(qc.warnings[:5]))
 
     state = PipelineState()
     app = create_app()

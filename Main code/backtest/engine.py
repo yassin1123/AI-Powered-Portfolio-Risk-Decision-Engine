@@ -7,12 +7,15 @@ with sample Σ and `prior_w`; see `docs/backtest_assumptions.md` vs DCC in `pre/
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
 
-from alpha.correlation_regime_signal import correlation_regime_signal
+from alpha.correlation_regime_signal import (
+    correlation_regime_signal,
+    neutral_corr_regime_signal,
+)
 from alpha.gating import gate_signals
 from alpha.signal_combiner import combine_signals, combine_signals_correlation_only
 from core.decision.decision_engine import (
@@ -35,12 +38,14 @@ from risk.portfolio import PortfolioRisk
 from risk.var import compute_full_var
 from scipy import stats
 
-from backtest.evaluation import summarize_backtest
+from backtest.ablation import AblationFlags
+from backtest.evaluation import summarize_backtest, var_breach_stats
 
 Mode = Literal[
     "full",
     "baseline",
     "vol_target_only",
+    "momentum_naive",
     "signals_only",
     "corr_signal_only",
     "placebo_random",
@@ -63,6 +68,15 @@ class BacktestResult:
     decision_log: list[dict[str, Any]]
     metrics: dict[str, float]
     mode: str
+    equity_gross: pd.Series | None = None
+
+
+class VarDecisionInfo(NamedTuple):
+    var_99: float
+    var_99_method: str
+    hs_var_99: float | None
+    mc_var_99: float | None
+    risk_disagreement: bool
 
 
 def _decision_engine_var99(
@@ -73,7 +87,7 @@ def _decision_engine_var99(
     sigma: np.ndarray,
     settings: AppSettings,
     rng: np.random.Generator,
-) -> tuple[float, str]:
+) -> VarDecisionInfo:
     """1d 99% VaR (positive loss) for decision layer; aligns with `compute_full_var` in live code."""
     t1 = tail_lr1.reindex(columns=tickers)
     t10 = lr10.reindex(columns=tickers)
@@ -91,7 +105,8 @@ def _decision_engine_var99(
             wn = pd.Series(np.ones(len(tickers)) / len(tickers), index=tickers)
         pr = PortfolioRisk.from_weights_sigma(wn, sigma, tickers)
         z = float(-stats.norm.ppf(0.01))
-        return z * pr.portfolio_vol, "parametric_normal_99"
+        v = z * pr.portfolio_vol
+        return VarDecisionInfo(v, "parametric_normal_99", None, None, False)
     w_arr = prior_w.reindex(tickers).fillna(0.0).values.astype(float)
     sw = float(w_arr.sum())
     if sw > 1e-12:
@@ -113,7 +128,11 @@ def _decision_engine_var99(
         settings.backtest.var_mc_sims,
         rng,
     )
-    return float(var_res.mc_var.get((0.99, 1), 0.0)), "mc_full_var"
+    mc = float(var_res.mc_var.get((0.99, 1), 0.0))
+    hs = float(var_res.hs_var.get((0.99, 1), 0.0))
+    den = max(mc, 1e-8)
+    disagree = abs(hs - mc) / den > float(settings.backtest.risk_disagreement_rel_threshold)
+    return VarDecisionInfo(mc, "mc_full_var", hs, mc, disagree)
 
 
 def _cov_to_corr(sigma: np.ndarray) -> tuple[np.ndarray, float]:
@@ -133,15 +152,23 @@ def run_backtest(
     mode: Mode = "full",
     random_seed: int = 42,
     warmup: int = 130,
+    ablation: AblationFlags | None = None,
+    rebalance_every: int | None = None,
 ) -> BacktestResult:
     rng = np.random.default_rng(random_seed)
+    ab = ablation or AblationFlags()
+    stride = int(rebalance_every or settings.backtest.rebalance_every_bars)
+    if stride < 1:
+        stride = 1
     tickers = list(closes.columns)
     log_rows: list[dict[str, Any]] = []
     equity_vals: list[float] = []
+    equity_gross_vals: list[float] = []
     turn_vals: list[float] = []
     prior_w = pd.Series(1.0 / len(tickers), index=tickers)
     cash = settings.backtest.initial_cash
     equity = cash
+    equity_gross = cash
 
     st = BacktestState()
     de = DecisionEngine(settings)
@@ -164,7 +191,11 @@ def run_backtest(
         if len(st.corr_history) > 400:
             st.corr_history = st.corr_history[-400:]
 
-        corr_res = correlation_regime_signal(st.corr_history, avg_corr, settings)
+        corr_res = (
+            correlation_regime_signal(st.corr_history, avg_corr, settings)
+            if ab.use_correlation_signal
+            else neutral_corr_regime_signal(avg_corr)
+        )
 
         tail_m = 1.0
         med_vol = float(np.sqrt(np.median(np.diag(sigma))) + 1e-8)
@@ -196,9 +227,11 @@ def run_backtest(
         st.regime_duration = ro.duration_bars
         st.last_transition_iso = ro.last_transition_iso
 
-        var_99, var_99_method = _decision_engine_var99(
+        vinfo = _decision_engine_var99(
             tail, feat.log_returns_10d, tickers, prior_w, sigma, settings, rng
         )
+        var_99 = vinfo.var_99
+        var_99_method = vinfo.var_99_method
         pr = PortfolioRisk.from_weights_sigma(w_eq.reindex(tickers).fillna(0), sigma, tickers)
         forecast_ann_vol = pr.portfolio_vol * np.sqrt(252)
 
@@ -206,7 +239,9 @@ def run_backtest(
             decision = neutral_decision_for_signals_only()
         elif mode == "corr_signal_only":
             decision = neutral_decision_for_signals_only()
-        elif mode in ("baseline", "vol_target_only", "placebo_random"):
+        elif not ab.use_decision_engine:
+            decision = neutral_decision_for_signals_only()
+        elif mode in ("baseline", "vol_target_only", "momentum_naive", "placebo_random"):
             decision = de.decide(
                 ro.label, corr_res, anom_count, var_99, settings.risk_limit_var_99
             )
@@ -214,49 +249,116 @@ def run_backtest(
             decision = de.decide(
                 ro.label, corr_res, anom_count, var_99, settings.risk_limit_var_99
             )
+
+        bar_k = t - warmup
+        hold_weights = stride > 1 and (bar_k % stride != 0)
+
+        if hold_weights:
+            px0 = closes.iloc[t]
+            px1 = closes.iloc[t + 1]
+            ret = np.log(px1 / px0).reindex(tickers).fillna(0.0)
+            port_ret = float((prior_w * ret).sum())
+            equity_gross *= np.exp(port_ret)
+            equity *= np.exp(port_ret)
+            turn_vals.append(0.0)
+            equity_vals.append(equity)
+            equity_gross_vals.append(equity_gross)
+            log_rows.append(
+                {
+                    "t": t,
+                    "timestamp": str(closes.index[t]),
+                    "regime": ro.label,
+                    "corr_z": corr_res.corr_z,
+                    "corr_bucket": corr_res.bucket,
+                    "decision_priority": decision.decision_priority,
+                    "decision_secondary": "|".join(decision.secondary_reasons),
+                    "decision": decision.reason_codes,
+                    "decision_narrative": decision.narrative,
+                    "anomaly_count": anom_count,
+                    "var_99": var_99,
+                    "var_99_method": var_99_method,
+                    "hs_var_99": vinfo.hs_var_99,
+                    "mc_var_99": vinfo.mc_var_99,
+                    "risk_disagreement": vinfo.risk_disagreement,
+                    "gross_exposure": float(prior_w.sum()),
+                    "hedge": "hold_bar",
+                    "pnl_frac": port_ret,
+                    "rebalance": False,
+                }
+            )
+            continue
 
         if mode == "baseline":
             w_star = pd.Series(1.0 / len(tickers), index=tickers)
         elif mode == "vol_target_only":
             vols = tail.std(ddof=1).replace(0, np.nan).fillna(0.01)
             w_star = inverse_vol_weights(vols)
+        elif mode == "momentum_naive":
+            win = min(60, max(5, len(lr_use) - 1))
+            mom = lr_use.iloc[-win:].sum().dropna()
+            k = max(1, len(tickers) // 2)
+            top = mom.nlargest(k).index
+            w_star = pd.Series(0.0, index=tickers)
+            w_star.loc[top] = 1.0 / len(top)
         elif mode == "placebo_random":
             raw = pd.Series(rng.standard_normal(len(tickers)), index=tickers)
             w_star = signals_to_weights(raw, settings)
         elif mode == "signals_only":
             comb = combine_signals(lr_use, sub, corr_res, settings)
             raw = comb.per_asset.reindex(tickers).fillna(0.0)
-            raw = gate_signals(raw, ro.label, anom_count)
+            raw = gate_signals(
+                raw,
+                ro.label,
+                anom_count,
+                apply_regime=ab.use_regime_gating,
+                apply_anomaly=ab.use_anomaly_gating,
+            )
             raw = apply_decision_to_signals(raw, decision, ro.label)
             w_star = optimize_weights("CALM", raw, sigma, tickers, settings)
         elif mode == "corr_signal_only":
             comb = combine_signals_correlation_only(tickers, corr_res, settings)
             raw = comb.per_asset.reindex(tickers).fillna(0.0)
-            raw = gate_signals(raw, ro.label, anom_count)
+            raw = gate_signals(
+                raw,
+                ro.label,
+                anom_count,
+                apply_regime=ab.use_regime_gating,
+                apply_anomaly=ab.use_anomaly_gating,
+            )
             raw = apply_decision_to_signals(raw, decision, ro.label)
             w_star = optimize_weights("CALM", raw, sigma, tickers, settings)
         else:
             comb = combine_signals(lr_use, sub, corr_res, settings)
             raw = comb.per_asset.reindex(tickers).fillna(0.0)
-            raw = gate_signals(raw, ro.label, anom_count)
+            raw = gate_signals(
+                raw,
+                ro.label,
+                anom_count,
+                apply_regime=ab.use_regime_gating,
+                apply_anomaly=ab.use_anomaly_gating,
+            )
             raw = apply_decision_to_signals(raw, decision, ro.label)
             w_star = optimize_weights(ro.label, raw, sigma, tickers, settings)
 
-        w_star = vol_target_scale(
-            w_star,
-            forecast_ann_vol,
-            settings.portfolio.target_ann_vol,
-            settings.portfolio.max_gross_leverage,
+        if ab.use_vol_target:
+            w_star = vol_target_scale(
+                w_star,
+                forecast_ann_vol,
+                settings.portfolio.target_ann_vol,
+                settings.portfolio.max_gross_leverage,
+            )
+        w_star = apply_constraints(
+            w_star, prior_w, settings, apply_turnover_cap=ab.use_turnover_cap
         )
-        w_star = apply_constraints(w_star, prior_w, settings)
 
-        cost = turnover_cost(prior_w, w_star, settings)
+        cost = turnover_cost(prior_w, w_star, settings) if ab.use_transaction_costs else 0.0
         equity *= 1.0 - cost
 
         px0 = closes.iloc[t]
         px1 = closes.iloc[t + 1]
         ret = np.log(px1 / px0).reindex(tickers).fillna(0.0)
         port_ret = float((w_star * ret).sum())
+        equity_gross *= np.exp(port_ret)
         equity *= np.exp(port_ret)
 
         hedge = recommend_hedge(
@@ -267,6 +369,7 @@ def run_backtest(
         turn_vals.append(turn)
         prior_w = w_star.copy()
         equity_vals.append(equity)
+        equity_gross_vals.append(equity_gross)
 
         log_rows.append(
             {
@@ -282,9 +385,13 @@ def run_backtest(
                 "anomaly_count": anom_count,
                 "var_99": var_99,
                 "var_99_method": var_99_method,
+                "hs_var_99": vinfo.hs_var_99,
+                "mc_var_99": vinfo.mc_var_99,
+                "risk_disagreement": vinfo.risk_disagreement,
                 "gross_exposure": float(w_star.sum()),
                 "hedge": hedge.narrative,
                 "pnl_frac": port_ret,
+                "rebalance": True,
             }
         )
 
@@ -292,13 +399,21 @@ def run_backtest(
     if len(idx) != len(equity_vals):
         idx = pd.RangeIndex(len(equity_vals))
     eq = pd.Series(equity_vals, index=idx[: len(equity_vals)])
+    eq_g = pd.Series(equity_gross_vals, index=eq.index)
     turn_s = pd.Series(turn_vals, index=eq.index)
     metrics = summarize_backtest(eq, turn_s, settings.risk_free_annual)
-    metrics["var_breach_rate"] = 0.0
+    mg = summarize_backtest(eq_g, turn_s, settings.risk_free_annual)
+    metrics["cagr_gross"] = mg["cagr"]
+    metrics["sharpe_gross"] = mg["sharpe"]
+    metrics["max_dd_gross"] = mg["max_dd"]
+    vb = var_breach_stats(log_rows)
+    metrics["var_breach_rate"] = vb["var_breach_rate"]
+    metrics["var_breach_cluster_max"] = vb["var_breach_cluster_max"]
     return BacktestResult(
         equity=eq,
         turnover=turn_s,
         decision_log=log_rows,
         metrics=metrics,
         mode=mode,
+        equity_gross=eq_g,
     )
