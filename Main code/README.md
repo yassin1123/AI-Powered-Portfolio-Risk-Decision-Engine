@@ -76,7 +76,9 @@ Roadmap: [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
 
 ## Quick start (live dashboard — the UI)
 
-From the **`Main code`** folder (this is the Python package root):
+**After cloning:** there is **no** `.venv` in the repo (it is gitignored). Everyone must **create their own** virtual environment and install dependencies — the steps below do that.
+
+From the **`Main code`** folder (this is the Python package root — if your clone has `main.py` at the repo root instead, run the commands there and skip the extra `cd`):
 
 ```powershell
 cd "Main code"
