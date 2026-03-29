@@ -1,0 +1,116 @@
+# Portfolio Risk Engine — runtime configuration (see brief §9)
+
+# core = drop vol ETPs + crypto (sane VaR/vol); full = entire brief universe
+universe_profile: core
+
+lookback_days: 504
+poll_interval_live_sec: 60
+poll_interval_sim_sec: 1
+simulation_mode: true
+simulation_speed: 1.0
+simulation_noise_std: 0.0
+
+mc_sims: 10000
+var_confidence_levels: [0.95, 0.99]
+var_horizons_days: [1, 10]
+
+risk_free_annual: 0.035
+beta_window: 252
+garch_window: 504
+garch_refit_days: 7
+dcc_refit_days: 1
+
+covariance_window: 252
+cholesky_frobenius_threshold: 0.05
+
+portfolio_total_value: 1000000.0
+risk_limit_var_99: 0.05
+risk_budget_default: 0.05
+weight_drift_threshold: 0.05
+tail_multiplier_hedge: 1.5
+avg_corr_alert: 0.7
+drawdown_hard_stop: 0.15
+
+anomaly:
+  z_window: 60
+  cusum_k_sigma: 0.5
+  cusum_h_sigma: 4.0
+  mahalanobis_chi2_quantile: 0.999
+  drawdown_watch: 0.05
+  drawdown_warning: 0.10
+  drawdown_critical: 0.20
+  conjunction_min_layers: 2
+
+regime:
+  vol_elevated_garch_mult: 1.25
+  stressed_tail_mult: 1.35
+  stressed_avg_corr: 0.55
+  transition_anomaly_count: 4
+  hmm_min_history: 60
+  use_hmm_features: false
+
+correlation_signal:
+  rolling_window: 120
+  z_high: 1.5
+  z_low: -1.0
+  eps_std: 1.0e-6
+
+decision_engine:
+  stress_corr_z_threshold: 1.0
+  anomaly_suppress_count: 3
+  exposure_scale_stress: 0.55
+  exposure_scale_transition: 0.82
+
+portfolio:
+  target_ann_vol: 0.10
+  max_gross_leverage: 1.0
+  max_single_weight: 0.35
+  min_cash_weight: 0.0
+  turnover_cap: 0.5
+  cost_bps: 10.0
+  long_only: true
+
+backtest:
+  fill_rule: next_bar
+  initial_cash: 1000000.0
+  walkforward_train_bars: 504
+  walkforward_test_bars: 63
+  walkforward_expanding: false
+  # MC paths for 1d 99% VaR in backtest (see docs/backtest_assumptions.md)
+  var_mc_sims: 1500
+  # Small positive equity drift so default ladder is not pure zero-mean noise (Sharpe ~ 0 then rf-negative).
+  synthetic_daily_drift: 0.00028
+  synthetic_vol_per_bar: 0.01
+
+alpha:
+  mom_windows: [20, 60, 120]
+  # Optional; same length as mom_windows — longer horizons weighted a bit more if set:
+  # mom_window_weights: [0.2, 0.35, 0.45]
+  mom_ewma_lambda: 0.94
+  mom_skip_recent_bars: 0
+  mom_vol_floor_quantile: 0.1
+  mr_window: 5
+  mr_slow_window: 63
+  mr_use_residual: true
+  xsec_quantile: 0.2
+  xsec_use_rank_gaussian: true
+  carry_level_weight: 0.65
+  carry_change_weight: 0.35
+  carry_change_bars: 21
+  carry_tanh_scale: 3.0
+  normalize_cross_section: true
+  regime_dynamic_weights: true
+  combine_weights:
+    momentum: 0.28
+    mean_reversion: 0.18
+    cross_sectional: 0.22
+    carry: 0.12
+    correlation_regime: 0.20
+
+dash_host: "127.0.0.1"
+dash_port: 8050
+dash_interval_ms: 500
+
+logging:
+  level: INFO
+  json: false

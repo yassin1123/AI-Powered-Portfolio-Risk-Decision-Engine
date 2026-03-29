@@ -1,0 +1,7 @@
+Strategy,Sharpe,max_dd,var_breach_rate,mean_turnover,cagr
+Baseline,-1.1964,-0.119128,0.0,0.0,-0.048822
+Vol targeting only,-1.2279,-0.119044,0.0,0.002675,-0.05114
+Signals only,-2.2329,-0.186071,0.0,0.236617,-0.128052
+Correlation signal only,-1.2279,-0.119044,0.0,0.002675,-0.05114
+Full system,-2.2329,-0.186071,0.0,0.236617,-0.128052
+placebo_random_signals,-3.5181,-0.209486,0.0,0.49205,-0.166398

@@ -1,0 +1,36 @@
+# Virtual environments — never commit these
+.venv/
+venv/
+env/
+
+# Zip archives (e.g. venv.zip breaks GitHub 100MB limit — ignore all .zip)
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Test / type caches
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+.benchmarks/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
