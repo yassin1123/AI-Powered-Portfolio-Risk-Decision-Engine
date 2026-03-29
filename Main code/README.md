@@ -80,7 +80,7 @@ Detail: [`docs/methodology.md`](docs/methodology.md).
 | L5 Alpha / signals | `alpha/` (flagship: `correlation_regime_signal.py`) |
 | L6 Portfolio + hedges | `portfolio/`, `hedging/`, `core/decision/` |
 | L7 Backtest / evaluation | `backtest/`, `research/` |
-| L8 Dashboard | `dashboard/`, `core/snapshot.py` |
+| L8 Dashboard | `dashboard/` (`app.py`, `sections/`, `view_model.py`), `core/snapshot.py`, `core/publish.py`, `core/schemas.py`, `api/live_snapshot.py` |
 
 Roadmap: [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
 
@@ -102,7 +102,9 @@ python main.py
 
 Then open a browser to **[http://127.0.0.1:8050](http://127.0.0.1:8050)** (or `http://localhost:8050`).
 
-What you get: a **Plotly Dash** operator view (header, **system state** including `corr_z` and last decision / rebalance reason, VaR bars, correlation heatmap, Monte Carlo, risk contributions, anomaly feed). The async risk loop in `main.py` is the **only writer** of snapshots; Dash **reads** them on a timer.
+What you get: a **Plotly Dash** **decision cockpit** — header and **market / decision state** (regime, `corr_z`, confidence, narrative), risk blocks (VaR, MC, contributions), correlation views, anomaly context, and supporting sections. Layout is driven by a **view model** (`dashboard/view_model.py`) built from the latest **`DashboardSnapshot`**. The async risk loop in `main.py` calls `run_risk_cycle` → `publish_snapshot`; Dash **polls read-only** and never writes state.
+
+**Live JSON contract:** the versioned payload shape for UI/backend alignment is **`live_snapshot_v1`** — see [`api/live_snapshot.py`](api/live_snapshot.py) and [`docs/backend_snapshot_contract.md`](docs/backend_snapshot_contract.md). Decision rule order and trace semantics: [`docs/decision_policy.md`](docs/decision_policy.md).
 
 **First run:** `DataFetcher` may download history (network + time). If port **8050** is busy, set **`dash_port`** in [`config.yaml`](config.yaml).
 
@@ -121,6 +123,9 @@ What you get: a **Plotly Dash** operator view (header, **system state** includin
 | [`docs/failure_analysis.md`](docs/failure_analysis.md) | When the system underperforms |
 | [`docs/RESEARCH_NOTE.md`](docs/RESEARCH_NOTE.md) | Thesis, data, validation, results placeholders |
 | [`docs/ablation_summary.md`](docs/ablation_summary.md) | Ablation grid and how to run it |
+| [`docs/decision_policy.md`](docs/decision_policy.md) | Ordered decision rules (R1→R8) and trace |
+| [`docs/backend_snapshot_contract.md`](docs/backend_snapshot_contract.md) | Live snapshot schema and UI contract |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Performance / benchmark notes |
 | [`research/failure_cases.md`](research/failure_cases.md) | Living notebook of bad outcomes |
 | [`docs/limitations.md`](docs/limitations.md) | Data and backtest caveats |
 | [`docs/results_summary.md`](docs/results_summary.md) | Ladder table + links to figures |
